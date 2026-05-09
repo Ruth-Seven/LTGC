@@ -1,11 +1,13 @@
 import torch
 import random
+import os
 import numpy as np
-import os, sys
-from torchvision import datasets, transforms
 from torch.utils.data import DataLoader, Dataset, Sampler
-# from base import BaseDataLoader
+from torchvision import transforms
 from PIL import Image
+
+SUPPORTED_EXTENSIONS = {'.png', '.jpg', '.jpeg', '.JPEG', '.bmp'}
+
 
 class BalancedSampler(Sampler):
     def __init__(self, buckets, retain_epoch_size=False):
@@ -16,7 +18,7 @@ class BalancedSampler(Sampler):
         self.buckets = buckets
         self.bucket_pointers = [0 for _ in range(self.bucket_num)]
         self.retain_epoch_size = retain_epoch_size
-    
+
     def __iter__(self):
         count = self.__len__()
         while count > 0:
@@ -35,122 +37,101 @@ class BalancedSampler(Sampler):
 
     def __len__(self):
         if self.retain_epoch_size:
-            return sum([len(bucket) for bucket in self.buckets]) # Actually we need to upscale to next full batch
+            return sum(len(b) for b in self.buckets)
         else:
-            return max([len(bucket) for bucket in self.buckets]) * self.bucket_num # Ensures every instance has the chance to be visited in an epoch
+            return max(len(b) for b in self.buckets) * self.bucket_num
 
-class LT_Dataset(Dataset):
-    
-    def __init__(self, root, txt, transform=None, training=False):
-        self.img_path = []
-        self.labels = []
+
+class ImageNetLTDataset(Dataset):
+    """扫描数字目录结构 {data_dir}/{split}/{class_id}/*.png 的数据集"""
+
+    def __init__(self, data_dir, split='train', transform=None):
+        self.data_dir = data_dir
+        self.split = split
         self.transform = transform
-        with open(txt) as f:
-            if 'ImageNet_LT_test' in txt:
-                for line in f:
-                    tmp = line.split()[0]
-                    tmp = tmp[:3] + tmp[13:]
-                    pth = os.path.join(root, tmp)
-                    self.img_path.append(pth)
-                    self.labels.append(int(line.split()[1]))
-            else:
-                for line in f:
-                    self.img_path.append(os.path.join(root, line.split()[0]))
-                    self.labels.append(int(line.split()[1]))
-        self.targets = self.labels # Sampler needs to use targets
-        self.train = training
-        
-    def __len__(self):
-        return len(self.labels)
-        
-    def __getitem__(self, index):
+        self.img_paths = []
+        self.labels = []
 
-        path = self.img_path[index]
+        split_dir = os.path.join(data_dir, split)
+        if not os.path.isdir(split_dir):
+            raise FileNotFoundError(f"Split directory not found: {split_dir}")
+
+        class_dirs = sorted(
+            d for d in os.listdir(split_dir)
+            if os.path.isdir(os.path.join(split_dir, d)) and d.isdigit()
+        )
+
+        for cls_name in class_dirs:
+            cls_id = int(cls_name)
+            cls_dir = os.path.join(split_dir, cls_name)
+            for fname in sorted(os.listdir(cls_dir)):
+                ext = os.path.splitext(fname)[1].lower()
+                if ext in SUPPORTED_EXTENSIONS:
+                    self.img_paths.append(os.path.join(cls_dir, fname))
+                    self.labels.append(cls_id)
+
+        self.targets = self.labels
+
+    def __len__(self):
+        return len(self.img_paths)
+
+    def __getitem__(self, index):
+        path = self.img_paths[index]
         label = self.labels[index]
-        
         with open(path, 'rb') as f:
             sample = Image.open(f).convert('RGB')
-            # print(sample.size)
-            # sample.save('./test_1.jpg')
-        
         if self.transform is not None:
-            sample_ts = self.transform(sample)
+            sample = self.transform(sample)
+        return sample, label, index
 
-        # return sample, label, path
-        if self.train:
-            return sample_ts, label, index
-        else:
-            return sample_ts, label,
-        
 
 class ImageNetLTDataLoader(DataLoader):
-    """
-    ImageNetLT Data Loader
-    """
-    def __init__(self, data_dir, batch_size, shuffle=True, num_workers=1, training=True, balanced=False, retain_epoch_size=True, 
-                 train_txt="./data_txt/ImageNet_LT/ImageNet_LT_train.txt", 
-                 val_txt="./data_txt/ImageNet_LT/ImageNet_LT_val.txt", 
-                 test_txt="./data_txt/ImageNet_LT/ImageNet_LT_test.txt"):
-        train_trsfm = transforms.Compose([
-            transforms.RandomResizedCrop(224),
-            transforms.RandomHorizontalFlip(),
-            transforms.ColorJitter(brightness=0.4, contrast=0.4, saturation=0.4, hue=0),
-            transforms.ToTensor(),
-            transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
-        ])
-        test_trsfm = transforms.Compose([
-            transforms.Resize(256),
-            # transforms.CenterCrop(224),
-            transforms.ToTensor(),
-            transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
-        ])
+    def __init__(self, data_dir, split='train', batch_size=1, shuffle=True,
+                 num_workers=1, balanced=False, retain_epoch_size=True,
+                 image_size=224):
+        if split == 'train':
+            transform = transforms.Compose([
+                transforms.RandomResizedCrop(image_size),
+                transforms.RandomHorizontalFlip(),
+                transforms.ColorJitter(brightness=0.4, contrast=0.4,
+                                       saturation=0.4, hue=0),
+                transforms.ToTensor(),
+                transforms.Normalize([0.485, 0.456, 0.406],
+                                     [0.229, 0.224, 0.225])
+            ])
+        else:
+            transform = transforms.Compose([
+                transforms.Resize(image_size + 32),
+                transforms.CenterCrop(image_size),
+                transforms.ToTensor(),
+                transforms.Normalize([0.485, 0.456, 0.406],
+                                     [0.229, 0.224, 0.225])
+            ])
 
-        if training:
-            dataset = LT_Dataset(data_dir,  train_txt, train_trsfm, training=training)
-            # dataset = LT_Dataset(data_dir,  train_txt, test_trsfm, training=training)
-            val_dataset = LT_Dataset(data_dir, val_txt, test_trsfm, training=False)
-        else: # test
-            dataset = LT_Dataset(data_dir, test_txt, test_trsfm, training=False)
-            val_dataset = None
-
+        dataset = ImageNetLTDataset(data_dir, split, transform)
         self.dataset = dataset
-        self.val_dataset = val_dataset
-
-        self.n_samples = len(self.dataset)
+        self.n_samples = len(dataset)
 
         num_classes = len(np.unique(dataset.targets))
-        assert num_classes == 1000
         self.num_classes = num_classes
-
         cls_num_list = [0] * num_classes
         for label in dataset.targets:
             cls_num_list[label] += 1
-
         self.cls_num_list = cls_num_list
 
-        if balanced:
-            if training:
-                buckets = [[] for _ in range(num_classes)]
-                for idx, label in enumerate(dataset.targets):
-                    buckets[label].append(idx)
-                sampler = BalancedSampler(buckets, retain_epoch_size)
-                shuffle = False
-            else:
-                print("Test set will not be evaluated with balanced sampler, nothing is done to make it balanced")
+        if balanced and split == 'train':
+            buckets = [[] for _ in range(num_classes)]
+            for idx, label in enumerate(dataset.targets):
+                buckets[label].append(idx)
+            sampler = BalancedSampler(buckets, retain_epoch_size)
+            shuffle = False
         else:
             sampler = None
-        
-        self.shuffle = shuffle
-        self.init_kwargs = {
+
+        init_kwargs = {
             'batch_size': batch_size,
-            'shuffle': self.shuffle,
-            'num_workers': num_workers
+            'shuffle': shuffle if sampler is None else False,
+            'num_workers': num_workers,
+            'sampler': sampler,
         }
-
-        super().__init__(dataset=self.dataset, **self.init_kwargs, sampler=sampler) # Note that sampler does not apply to validation set
-
-    def split_validation(self):
-        # If you do not want to validate:
-        #return None
-        # If you want to validate:
-        return DataLoader(dataset=self.val_dataset, **self.init_kwargs)
+        super().__init__(dataset=dataset, **init_kwargs)

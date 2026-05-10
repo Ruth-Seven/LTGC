@@ -4,6 +4,7 @@
 """
 import torch
 import time
+import re
 from transformers import LlavaForConditionalGeneration, AutoProcessor
 from PIL import Image
 
@@ -110,3 +111,50 @@ def describe_image(image_tensor, text_prompt, max_retries=2):
                 time.sleep(1)
 
     return ""
+
+
+def describe_simple(image_tensor, class_name, max_retries=2):
+    """生成简洁的类别描述（短句式，无场景/人物）
+
+    Args:
+        image_tensor: PyTorch 张量 (CxHxW)
+        class_name: 类别名称
+        max_retries: 最大重试次数
+
+    Returns:
+        str: 简短描述，如 "A photo of the class Shih-Tzu, with fluffy white fur"
+    """
+    for attempt in range(max_retries):
+        try:
+            model, processor = _load_model()
+            image = _tensor_to_pil(image_tensor)
+
+            prompt = (
+                f"3 words describing the visual features of this {class_name} "
+                f"(comma-separated):"
+            )
+            conversation = [{"role": "user", "content": [{"type": "image"}, {"type": "text", "text": prompt}]}]
+            text = processor.apply_chat_template(conversation, add_generation_prompt=True)
+            inputs = processor(images=image, text=text, return_tensors="pt")
+            input_ids = inputs['input_ids'].to(model.device)
+            pixel_values = inputs['pixel_values'].to(model.device)
+
+            with torch.no_grad():
+                output = model.generate(
+                    input_ids=input_ids, pixel_values=pixel_values,
+                    max_new_tokens=30, do_sample=False,
+                )
+            response = processor.decode(output[0][input_ids.shape[1]:], skip_special_tokens=True)
+
+            parts = [p.strip().lower() for p in response.split(',')[:3]]
+            parts = [re.sub(r'[^a-z\s-]', '', p) for p in parts if p]
+            features = ' and '.join(parts[:2])
+            if features:
+                return f"A photo of the class {class_name}, with {features}"
+
+        except Exception as e:
+            print(f"[vision_llm] Simple describe failed: {e}")
+            if attempt < max_retries - 1:
+                time.sleep(1)
+
+    return f"A photo of the class {class_name}"

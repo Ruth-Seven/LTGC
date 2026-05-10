@@ -12,7 +12,7 @@ from torchvision import transforms
 from config import IMAGENET_DIR, DESCRIPTIONS_DIR
 from data_loader import ImageNetLTDataLoader
 from data_txt.imagenet_label_mapping import get_readable_name
-from vision_llm import describe_image
+from vision_llm import describe_simple as describe_image
 from utils import count_samples
 
 

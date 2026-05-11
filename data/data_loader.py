@@ -96,8 +96,8 @@ class ImageNetLTDataLoader(DataLoader):
                  image_size=224):
         if split == 'train':
             transform = transforms.Compose([
-                transforms.RandomResizedCrop(image_size),
-                transforms.RandomHorizontalFlip(),
+                # transforms.RandomResizedCrop(image_size),
+                # transforms.RandomHorizontalFlip(),
                 transforms.ColorJitter(brightness=0.4, contrast=0.4,
                                        saturation=0.4, hue=0),
                 transforms.ToTensor(),
@@ -106,8 +106,8 @@ class ImageNetLTDataLoader(DataLoader):
             ])
         else:
             transform = transforms.Compose([
-                transforms.Resize(image_size + 32),
-                transforms.CenterCrop(image_size),
+                # transforms.Resize(image_size + 32),
+                # transforms.CenterCrop(image_size),
                 transforms.ToTensor(),
                 transforms.Normalize([0.485, 0.456, 0.406],
                                      [0.229, 0.224, 0.225])

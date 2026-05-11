@@ -14,6 +14,10 @@ from model.clip_score import score
 from model.image_gen import generate
 from data_txt.imagenet_label_mapping import get_readable_name
 
+# distill_distentictive_features_prompt = (
+#     f"Please use Template 2 to summarize the most distinctive features of class [y]}. Template 2: A photo of the class [y] with {feature 1}{feature 2}{...}."
+# )
+
 
 def parse_args():
     parser = argparse.ArgumentParser(description='LTGC Step 3: Text → Image')
@@ -45,17 +49,24 @@ def main():
             if os.path.exists(saved_path):
                 print(f"[generate] Skip: {saved_path}")
                 continue
+            
+            # use a differer approach to regenerae 
+            int max_retry = 10
+            while max_retry > 0:
+                img_path = generate(text, saved_path)
+                if img_path is None:
+                    continue
 
-            img_path = generate(text, saved_path)
-            if img_path is None:
-                continue
+                #todo simplify prompt and easier clip checkability
+                clip_score = score(img_path, f"A photo of a {class_name.lower()}")
 
-            clip_score = score(img_path, f"A photo of a {class_name.lower()}")
+                if clip_score >= args.thresh:
+                    print(f"[generate] Score {clip_score:.4f} >= {args.thresh}, accepted")
+                    break
+                else:
+                    print(f"[generate] Score {clip_score:.4f} < {args.thresh}")
 
-            if clip_score >= args.thresh:
-                print(f"[generate] Score {clip_score:.4f} >= {args.thresh}, accepted")
-            else:
-                print(f"[generate] Score {clip_score:.4f} < {args.thresh}")
+                max_retry -= 1
 
     print(f"[generate] Done. {total} classes processed.")
 

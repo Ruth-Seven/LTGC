@@ -7,20 +7,26 @@ import sys
 import csv
 import argparse
 import pandas as pd
+from tqdm import tqdm
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from config import DESCRIPTIONS_DIR
-from model.text_llm import extend_descriptions
+from model.text_llm import extend_descriptions, refection_descriptions
 from data_txt.imagenet_label_mapping import get_readable_name
 
+extension_prompt = f"Besides these descriptions mentioned above, please use the Template 1 to list other possible [distinctive features] and [specific scenes]\n"
+             + f"Template1: A photo of the class {class_name}, [with distinctive features] [in specific scenes]."
+
+
+reflection_prompt = f"Please exclude any repetitive [distinctive features] and [specific scenes] for class {class_name} in this descriptions list.\n"
 
 def parse_args():
     parser = argparse.ArgumentParser(description='LTGC Step 2: Description → Extended Descriptions')
     parser.add_argument('-exi', '--existing_description_path',
                         default=os.path.join(DESCRIPTIONS_DIR, 'existing_description_list.csv'),
                         help='Input descriptions CSV')
-    parser.add_argument('-m', '--max_generate_num', default=200, type=int,
+    parser.add_argument('-m', '--max_generate_num', default=50, type=int,
                         help='Max descriptions per class')
     parser.add_argument('-ext', '--extended_description_path',
                         default=os.path.join(DESCRIPTIONS_DIR, 'extended_description.csv'),
@@ -34,30 +40,32 @@ def main():
 
     df = pd.read_csv(args.existing_description_path, header=None, names=['label', 'text'])
     grouped = df.groupby('label')['text'].apply(list).to_dict()
-
+    extension_descriptions[label] = df()
     total = len(grouped)
-    for cls_idx, (label, texts) in enumerate(grouped.items()):
-        print(f"[extend] Class {label} ({cls_idx + 1}/{total}): {len(texts)} existing")
+    pbar = tqdm(total=total, desc="[extend] Processing classes", unit="class")
+    for idx, (label, texts) in enumerate(grouped.items()):
 
-        while len(texts) < args.max_generate_num:
-            class_name = get_readable_name(int(label)).split(", ")[0]
-            new_texts = extend_descriptions(texts, class_name)
+
+        class_name = get_readable_name(int(label)).split(", ")[0]
+        print(f"[extend] Class {label} {class_name} ({idx + 1}/{total}): {len(texts)} existing")
+        extension_descriptions[label] = []
+        while len(texts) + len(extension_descriptions[label]) < args.max_generate_num:
+            new_texts = extend_descriptions(texts, prompt=extension_prompt.format(class_name=class_name))
 
             if not new_texts:
                 print(f"[extend] No new descriptions, stopping")
                 break
+    
+            extension_descriptions[label].extend(new_texts)
+            extension_descriptions[label] = refection_descriptions(extension_descriptions[label], prompt=reflection_prompt.format(class_name=class_name))
 
-            texts.extend(new_texts)
+        with open(args.extended_description_path, 'a', newline='') as f:
+            writer = csv.writer(f)
+            for t in extension_descriptions[label]:
+                writer.writerow([label, t])
 
-            with open(args.extended_description_path, 'a', newline='') as f:
-                writer = csv.writer(f)
-                for t in new_texts:
-                    writer.writerow([label, t])
-
-            print(f"[extend] Class {label}: generated {len(new_texts)} (total: {len(texts)})")
-
-        print(f"[extend] Class {label} done: {len(texts)} descriptions")
-
+        print(f"[extend] Class {label} {class_name}: generated {len(extension_descriptions[label])} (total: {len(texts)})")
+        pbar.update(1)
 
 if __name__ == "__main__":
     main()

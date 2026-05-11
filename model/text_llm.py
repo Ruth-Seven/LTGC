@@ -52,12 +52,12 @@ def _unload_model():
     print("[text_llm] Model unloaded.")
 
 
-def extend_descriptions(existing_texts, class_name, max_new=100, temperature=0.8):
+def extend_descriptions(existing_texts, prompt, max_teken=10000, temperature=0.8):
     """基于已有描述生成新的多样化描述
 
     Args:
         existing_texts: 已有描述文本列表
-        class_name: 类别名称
+        prompt: 生成提示词
         max_new: 最大生成 token 数
         temperature: 生成温度 (越高越多样)
 
@@ -67,14 +67,12 @@ def extend_descriptions(existing_texts, class_name, max_new=100, temperature=0.8
     model, tokenizer = _load_model()
 
     existing_block = "\n".join(f"- {t}" for t in existing_texts)
-    prompt = (
-        f"Generate new descriptions for the class '{class_name}'. "
-        f"Each description must start with 'A photo of the class {class_name}'.\n"
+    extend_prompt = (
         f"Existing descriptions:\n{existing_block}\n\n"
-        f"Generate different descriptions covering various features and scenes:"
+        f"{prompt}"
     )
 
-    inputs = tokenizer(prompt, return_tensors="pt").to(model.device)
+    inputs = tokenizer(extend_prompt, return_tensors="pt").to(model.device)
 
     with torch.no_grad():
         out = model.generate(
@@ -96,6 +94,21 @@ def extend_descriptions(existing_texts, class_name, max_new=100, temperature=0.8
 
     return sentences
 
+def refection_descriptions(texts, prompt, max_token=10000, temperature=0.2):
+    model, tokenizer = _load_model()
+
+    refection_prompt =  "\n\nExisting Descriptions:\n" + "\n".join(f"- {t}" for t in texts) + prompt 
+    inputs = tokenizer(refection_prompt, return_tensors="pt").to(model.device)
+
+    with torch.no_grad():
+        out = model.generate(
+            **inputs,
+            max_new_tokens=max_token,
+            do_sample=False,
+            temperature=temperature,
+        )
+    reponse = tokenizer.decode(out[0][inputs['input_ids'].shape[1]:], skip_special_tokens=True)
+    return reponse.strip().split("\n")
 
 def refine_description(text, class_name):
     """润色描述，使其更符合类别特征

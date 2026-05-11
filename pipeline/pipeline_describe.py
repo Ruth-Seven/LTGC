@@ -7,6 +7,7 @@ import sys
 import json
 import csv
 import argparse
+import time
 import torch
 from torchvision import transforms
 
@@ -21,10 +22,26 @@ from tqdm import tqdm
 
 
 text_prompt = (
-            "Please use the Template to briefly describe the image of the class {name}. Template:\n"
-            "'A photo of the class {name}, with [distinctive features], in [specific scenes].'\n"
+            "Please use the Template to briefly describe the image of the class {name} in olny one sentence. Template:\n"
+            "'A photo of the class {name}, with [distinctive features], [specific scenes].'\n"
         )
 
+
+def parse_args():
+    parser = argparse.ArgumentParser(description='LTGC Step 1: Image → Description')
+    parser.add_argument('-d', '--data_dir', default=IMAGENET_DIR, help='Dataset root')
+    parser.add_argument('-m', '--tail_num_threshold', default=50, type=int, help='Tail class threshold')
+    parser.add_argument('-f', '--class_number_file',
+                        default='/root/tobacco-experiment/model/LTGC/data_txt/ImageNet_LT/imagenetlt_class_count.txt',
+                        help='Class count file')
+    parser.add_argument('-exi', '--existing_description_path',
+                        default=os.path.join(DESCRIPTIONS_DIR, 'existing_description_list.csv'),
+                        help='Output CSV path')
+    parser.add_argument('--examples-dir',
+                        default=os.path.join('/root/tobacco-experiment/model/LTGC/example', 'description_examples'),
+                        help='Directory to save example markdown with images')
+    parser.add_argument('-t', '--test', default=False, help='Run in test mode with limited examples')
+    return parser.parse_args()
 
 def describe_example_markdown(examples, output_dir):
     """将尾部类描述示例保存为 Markdown 文件（含图片）
@@ -55,36 +72,21 @@ def describe_example_markdown(examples, output_dir):
     print(f"[describe_example_markdown] Examples saved to {md_path}")
 
 
-def parse_args():
-    parser = argparse.ArgumentParser(description='LTGC Step 1: Image → Description')
-    parser.add_argument('-d', '--data_dir', default=IMAGENET_DIR, help='Dataset root')
-    parser.add_argument('-m', '--max_num', default=100, type=int, help='Tail class threshold')
-    parser.add_argument('-f', '--class_number_file',
-                        default='data_txt/ImageNet_LT/imagenetlt_class_count.txt',
-                        help='Class count file')
-    parser.add_argument('-exi', '--existing_description_path',
-                        default=os.path.join(DESCRIPTIONS_DIR, 'existing_description_list.csv'),
-                        help='Output CSV path')
-    parser.add_argument('--examples-dir',
-                        default=os.path.join(DESCRIPTIONS_DIR, 'description_examples'),
-                        help='Directory to save example markdown with images')
-    return parser.parse_args()
-
 
 def main():
     args = parse_args()
     os.makedirs(os.path.dirname(args.existing_description_path), exist_ok=True)
-    print("[starting] Dataloading....")
+    print("[start] Dataloading....")
     loader = ImageNetLTDataLoader(
         data_dir=args.data_dir,
         split='train',
         batch_size=1,
         shuffle=False,
-        num_workers=4,
+        num_workers=16,
     )
 
     if not os.path.exists(args.class_number_file):
-        count_samples(loader)
+        count_samples(loader, output_path=args.class_number_file)
         with open(args.class_number_file, 'r') as f:
             class_counts = json.load(f)
     else:
@@ -100,13 +102,17 @@ def main():
 
     mean = torch.tensor([0.485, 0.456, 0.406]).view(1, 3, 1, 1)
     std = torch.tensor([0.229, 0.224, 0.225]).view(1, 3, 1, 1)
-
+    print("[Describe] Starting image description generation for tail classes...")
+    description_file = args.existing_description_path
+    if os.path.exists(description_file):
+        print(f"[describe] Backuping existing description file: {description_file}")
+        os.rename(description_file, description_file + "_" + time.strftime("%Y%m%d-%H%M%S"))
     pbar = tqdm(total=total, desc="[describe] Processing", unit="img")
     for pack in loader:
         data, target, index = pack
         cls_id = int(target)
 
-        if class_counts.get(str(cls_id), 0) < args.max_num:
+        if class_counts.get(str(cls_id), 0) < args.tail_num_threshold:
             tail_count += 1
             real_name = get_readable_name(cls_id).split(", ")[0]
             prompt = text_prompt.format(name=real_name)
@@ -122,13 +128,16 @@ def main():
                     examples.append((cls_id, data.clone(), description, real_name))
 
                 if len(data_to_write) >= 10:
-                    with open(args.existing_description_path, 'a', newline='') as f:
+                    with open(description_file, 'a', newline='') as f:
                         csv.writer(f).writerows(data_to_write)
                     data_to_write = []
 
         processed += 1
-        pbar.set_postfix(tail=tail_count, batch=processed)
+        pbar.set_postfix(tail=tail_count, batch=processed, original_cls_num=class_counts.get(str(cls_id), 0))
         pbar.update(1)
+        
+        if(test and len(example_classes) > 29):
+            break
     pbar.close()
 
     if data_to_write:

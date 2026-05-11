@@ -3,12 +3,15 @@ LTGC 流水线 - Step 2: 描述扩展
 读取已有描述 → 本地 LLM 生成多样化变体 → 保存 CSV
 """
 import os
+import sys
 import csv
 import argparse
 import pandas as pd
 
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 from config import DESCRIPTIONS_DIR
-from text_llm import extend_descriptions
+from model.text_llm import extend_descriptions
 from data_txt.imagenet_label_mapping import get_readable_name
 
 

@@ -35,10 +35,11 @@ VLM_MAX_TOKENS = 200
 # ============================================================
 # Stable Diffusion 配置
 # ============================================================
-SD_MODEL_ID = "runwayml/stable-diffusion-v1-5"
-SD_MODEL_PATH = "/data/model/runwayml_stable-diffusion-v1-5"
-SD_IMAGE_SIZE = 512
-SD_NUM_INFERENCE_STEPS = 50
+SD_MODEL_VERSION = "sdxl"       # "v1_5" 或 "sdxl"
+SD_V1_5_PATH = "/data/model/runwayml_stable-diffusion-v1-5"
+SDXL_PATH = "/data/model/stable-diffusion-xl-base-1.0"
+SD_IMAGE_SIZE = 1024
+SD_NUM_INFERENCE_STEPS = 30
 SD_GUIDANCE_SCALE = 7.5
 
 # ============================================================

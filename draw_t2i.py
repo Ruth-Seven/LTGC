@@ -12,11 +12,14 @@
 import pandas as pd
 import torch
 import os
+import sys
 import argparse
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
 from llm_config import DESCRIPTIONS_DIR, DATA_DIR
-from clip_filter import clip_filter
-from hf_gen import hf_gen, description_refine, get_cls_template
+from model.clip_score import score as clip_filter
+from model.hf_gen import hf_gen, description_refine, get_cls_template
 
 
 def parse_args():

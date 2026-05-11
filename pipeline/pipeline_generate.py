@@ -3,12 +3,15 @@ LTGC 流水线 - Step 3: 图像生成
 读取扩展描述 → SD 生成图像 → CLIP 质量筛选 → 保存
 """
 import os
+import sys
 import argparse
 import pandas as pd
 
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 from config import DESCRIPTIONS_DIR, DATA_DIR
-from clip_score import score
-from image_gen import generate
+from model.clip_score import score
+from model.image_gen import generate
 from data_txt.imagenet_label_mapping import get_readable_name
 
 

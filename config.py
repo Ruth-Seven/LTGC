@@ -33,8 +33,9 @@ LOCAL_VLM_ID = "/data/model/llava-hf_llava-1.5-13b-hf"
 VLM_MAX_TOKENS = 200
 
 # ============================================================
-# 本地 Text LLM (描述扩展) 配置
+# Text LLM (描述扩展) 配置
 # ============================================================
+TEXT_LLM_BACKEND = "api"       # "local" (Qwen) 或 "api" (DeepSeek)
 TEXT_LLM_MODEL_ID = "/data/model/Qwen_Qwen2.5-7B-Instruct"
 TEXT_LLM_MAX_TOKENS = 10000
 TEXT_LLM_TEMPERATURE = 0.8

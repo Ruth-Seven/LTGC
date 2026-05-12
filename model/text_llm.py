@@ -1,13 +1,20 @@
 """
 文本生成模块
-使用纯文本 LLM (Qwen2.5-7B-Instruct) 进行描述扩展和精炼
-替代之前的 LLaVA 视觉模型做纯文本生成
+支持两种后端:
+  - "local": 本地 Qwen2.5-7B-Instruct
+  - "api": DeepSeek Chat API (deepseek-chat)
 """
 import torch
 import re
+import requests
+import json
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
-from config import TEXT_LLM_MODEL_ID, TEXT_LLM_MAX_TOKENS, TEXT_LLM_TEMPERATURE
+from config import (
+    TEXT_LLM_BACKEND, TEXT_LLM_MODEL_ID, TEXT_LLM_MAX_TOKENS, TEXT_LLM_TEMPERATURE,
+    DEEPSEEK_API_KEY, DEEPSEEK_API_ENDPOINT, DEEPSEEK_CHAT_MODEL,
+    get_deepseek_headers,
+)
 
 _model = None
 _tokenizer = None
@@ -15,12 +22,14 @@ _tokenizer = None
 SYSTEM_PROMPT = "You are a helpful assistant that generates diverse and detailed image descriptions for image classification datasets."
 
 
+# ── Local backend ──────────────────────────────────────────────
+
 def _load_model():
     global _model, _tokenizer
     if _model is not None:
         return _model, _tokenizer
 
-    print(f"[text_llm] Loading {TEXT_LLM_MODEL_ID} ...")
+    print(f"[text_llm] Loading local model {TEXT_LLM_MODEL_ID} ...")
     dtype = torch.float16 if torch.cuda.is_available() else torch.float32
 
     _model = AutoModelForCausalLM.from_pretrained(
@@ -41,7 +50,7 @@ def _unload_model():
     print("[text_llm] Model unloaded.")
 
 
-def _generate(messages, max_tokens=TEXT_LLM_MAX_TOKENS, temperature=TEXT_LLM_TEMPERATURE, do_sample=True, top_p=0.9):
+def _generate_local(messages, max_tokens, temperature, do_sample, top_p):
     model, tokenizer = _load_model()
 
     text = tokenizer.apply_chat_template(
@@ -62,18 +71,48 @@ def _generate(messages, max_tokens=TEXT_LLM_MAX_TOKENS, temperature=TEXT_LLM_TEM
     return response.strip()
 
 
+# ── API backend (DeepSeek) ─────────────────────────────────────
+
+def _generate_api(messages, max_tokens, temperature, do_sample, top_p):
+    headers = get_deepseek_headers()
+
+    payload = {
+        "model": DEEPSEEK_CHAT_MODEL,
+        "messages": messages,
+        "max_tokens": max_tokens,
+        "temperature": temperature,
+    }
+    if not do_sample:
+        payload["temperature"] = 0.0
+
+    try:
+        resp = requests.post(
+            DEEPSEEK_API_ENDPOINT,
+            headers=headers,
+            json=payload,
+            timeout=120,
+        )
+        resp.raise_for_status()
+        result = resp.json()
+        return result["choices"][0]["message"]["content"].strip()
+    except Exception as e:
+        print(f"[text_llm] DeepSeek API error: {e}")
+        return ""
+
+
+# ── Dispatch ───────────────────────────────────────────────────
+
+def _generate(messages, max_tokens=TEXT_LLM_MAX_TOKENS, temperature=TEXT_LLM_TEMPERATURE, do_sample=True, top_p=0.9):
+    if TEXT_LLM_BACKEND == "api":
+        return _generate_api(messages, max_tokens, temperature, do_sample, top_p)
+    else:
+        return _generate_local(messages, max_tokens, temperature, do_sample, top_p)
+
+
+# ── Public API ─────────────────────────────────────────────────
+
 def extend_descriptions(existing_texts, prompt, max_token=TEXT_LLM_MAX_TOKENS, temperature=TEXT_LLM_TEMPERATURE):
-    """基于已有描述生成新的多样化描述
-
-    Args:
-        existing_texts: 已有描述文本列表
-        prompt: 生成提示词
-        max_token: 最大生成 token 数
-        temperature: 生成温度 (越高越多样)
-
-    Returns:
-        list[str]: 新生成的描述列表
-    """
+    """基于已有描述生成新的多样化描述"""
     existing_block = "\n".join(f"- {t}" for t in existing_texts)
     messages = [
         {"role": "system", "content": SYSTEM_PROMPT},
@@ -89,17 +128,7 @@ def extend_descriptions(existing_texts, prompt, max_token=TEXT_LLM_MAX_TOKENS, t
 
 
 def refection_descriptions(texts, prompt, max_token=TEXT_LLM_MAX_TOKENS, temperature=0.2):
-    """去重/精炼描述列表
-
-    Args:
-        texts: 描述文本列表
-        prompt: 精炼提示词
-        max_token: 最大生成 token 数
-        temperature: 生成温度
-
-    Returns:
-        list[str]: 精炼后的描述列表
-    """
+    """去重/精炼描述列表"""
     existing_block = "\n".join(f"- {t}" for t in texts)
     messages = [
         {"role": "system", "content": SYSTEM_PROMPT},
@@ -110,15 +139,7 @@ def refection_descriptions(texts, prompt, max_token=TEXT_LLM_MAX_TOKENS, tempera
 
 
 def refine_description(text, class_name):
-    """润色描述，使其更符合类别特征
-
-    Args:
-        text: 原始描述文本
-        class_name: 类别名称
-
-    Returns:
-        str: 润色后的描述
-    """
+    """润色描述"""
     messages = [
         {"role": "system", "content": SYSTEM_PROMPT},
         {
@@ -135,14 +156,7 @@ def refine_description(text, class_name):
 
 
 def generate_template(class_name):
-    """生成类别模板描述
-
-    Args:
-        class_name: 类别名称
-
-    Returns:
-        str: 模板描述文本
-    """
+    """生成类别模板描述"""
     messages = [
         {"role": "system", "content": SYSTEM_PROMPT},
         {

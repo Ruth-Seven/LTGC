@@ -1,6 +1,6 @@
 """
 LTGC 流水线 - Step 3: 图像生成
-读取扩展描述 → SD 生成图像 → CLIP 质量筛选 → 保存
+读取扩展描述 → SD 生成图像 → CLIP 分数展示 + 交互确认 → 保存
 """
 import os
 import sys
@@ -14,10 +14,6 @@ from model.clip_score import score
 from model.image_gen import generate
 from data_txt.imagenet_label_mapping import get_readable_name
 
-# distill_distentictive_features_prompt = (
-#     f"Please use Template 2 to summarize the most distinctive features of class [y]}. Template 2: A photo of the class [y] with {feature 1}{feature 2}{...}."
-# )
-
 
 def parse_args():
     parser = argparse.ArgumentParser(description='LTGC Step 3: Text → Image')
@@ -27,7 +23,25 @@ def parse_args():
     parser.add_argument('-d', '--data_dir', default=DATA_DIR, help='Output root')
     parser.add_argument('-t', '--thresh', default=0.25, type=float, help='CLIP score threshold')
     parser.add_argument('-r', '--max_rounds', default=3, type=int, help='Max retry rounds')
+    parser.add_argument('--interactive', action='store_true',
+                        help='交互模式：展示 CLIP 分数并让用户确认图像是否合格')
     return parser.parse_args()
+
+
+def ask_user(img_path, clip_score, class_name):
+    """交互式确认图像是否合格"""
+    print(f"\n{'='*50}")
+    print(f"  类别: {class_name}")
+    print(f"  CLIP 分数: {clip_score:.4f}")
+    print(f"  图像路径: {img_path}")
+    print(f"{'='*50}")
+    while True:
+        answer = input("  该图像是否合格？(y/n): ").strip().lower()
+        if answer in ('y', 'yes'):
+            return True
+        if answer in ('n', 'no'):
+            return False
+        print("  请输入 y 或 n")
 
 
 def main():
@@ -49,24 +63,36 @@ def main():
             if os.path.exists(saved_path):
                 print(f"[generate] Skip: {saved_path}")
                 continue
-            
-            # use a differer approach to regenerae 
-            int max_retry = 10
-            while max_retry > 0:
+
+            accepted = False
+            for attempt in range(args.max_rounds):
                 img_path = generate(text, saved_path)
                 if img_path is None:
                     continue
 
-                #todo simplify prompt and easier clip checkability
                 clip_score = score(img_path, f"A photo of a {class_name.lower()}")
+                print(f"[generate] Attempt {attempt + 1}/{args.max_rounds}, Score: {clip_score:.4f}")
 
-                if clip_score >= args.thresh:
-                    print(f"[generate] Score {clip_score:.4f} >= {args.thresh}, accepted")
-                    break
+                clip_pass = clip_score >= args.thresh
+
+                if args.interactive:
+                    user_pass = ask_user(img_path, clip_score, class_name)
+                    if user_pass:
+                        print(f"[generate] 用户确认合格 ✓")
+                        accepted = True
+                        break
+                    else:
+                        print(f"[generate] 用户认为不合格，重试...")
                 else:
-                    print(f"[generate] Score {clip_score:.4f} < {args.thresh}")
+                    if clip_pass:
+                        print(f"[generate] Score {clip_score:.4f} >= {args.thresh}, accepted")
+                        accepted = True
+                        break
+                    else:
+                        print(f"[generate] Score {clip_score:.4f} < {args.thresh}")
 
-                max_retry -= 1
+            if not accepted:
+                print(f"[generate] 所有尝试均未通过，跳过该描述")
 
     print(f"[generate] Done. {total} classes processed.")
 

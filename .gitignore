@@ -2,3 +2,4 @@ __pycache__/
 Imagenet
 dalle_gen/imagenet/*
 descriptions_data
+example/

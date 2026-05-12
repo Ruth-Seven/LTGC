@@ -17,14 +17,6 @@ if _env_file.exists():
                 key, val = line.split("=", 1)
                 os.environ.setdefault(key.strip(), val.strip())
 
-# ============================================================
-# DeepSeek API 配置
-# ============================================================
-DEEPSEEK_API_KEY = os.environ.get("DEEPSEEK_API_KEY", "Replace with your DeepSeek API Key")
-DEEPSEEK_API_ENDPOINT = "https://api.deepseek.com/chat/completions"
-DEEPSEEK_CHAT_MODEL = "deepseek-chat"
-DEEPSEEK_MAX_TOKENS = 300
-DEEPSEEK_TEMPERATURE = 0.7
 
 # ============================================================
 # 本地 VLM (LLaVA) 配置
@@ -36,10 +28,23 @@ VLM_MAX_TOKENS = 200
 # Text LLM (描述扩展) 配置
 # ============================================================
 TEXT_LLM_BACKEND = "api"       # "local" (Qwen) 或 "api" (DeepSeek)
+# local llm 配置
 TEXT_LLM_MODEL_ID = "/data/model/Qwen_Qwen2.5-7B-Instruct"
 TEXT_LLM_MAX_TOKENS = 10000
 TEXT_LLM_TEMPERATURE = 0.8
+# api llm 配置
+DEEPSEEK_API_KEY = os.environ.get("DEEPSEEK_API_KEY", "Replace with your DeepSeek API Key")
+DEEPSEEK_API_ENDPOINT = "https://api.deepseek.com/chat/completions"
+DEEPSEEK_CHAT_MODEL = "deepseek-v4-flash"
+DEEPSEEK_MAX_TOKENS = 10000
+DEEPSEEK_TEMPERATURE = 0.8
 
+# ============================================================
+# CLIP 配置
+# ============================================================
+CLIP_BACKEND = "huggingface"    # "openai" (原生clip库) 或 "huggingface" (transformers)
+CLIP_LOCAL_MODEL_PATH = "//data/model/hub/models--openai--clip-vit-base-patch32"  # 仅在 CLIP_BACKEND="huggingface" 且不使用在线模型时有效
+CLIP_MODEL_NAME = "openai/clip-vit-base-patch32"
 # ============================================================
 # Stable Diffusion 配置
 # ============================================================
@@ -54,7 +59,10 @@ SD_GUIDANCE_SCALE = 7.5
 # 数据路径配置
 # ============================================================
 DATA_DIR = "/data"
+PWD=os.path.abspath(os.path.dirname(__file__))
 DESCRIPTIONS_DIR = os.path.join(DATA_DIR, "descriptions_data")
+GENERATION_EXAMPLE_DIR=os.path.join(PWD, "example/generation_examples")
+DESCRIPTION_EXAMPLE_DIR=os.path.join(PWD, "exampledescription_examples")
 GEN_TRAIN_DIR = os.path.join(DATA_DIR, "gen_train")
 IMAGENET_DIR = "/data/imagenet-lt/torch_image_folder/mnt/volume_sfo3_01/imagenet-lt/ImageDataset"
 

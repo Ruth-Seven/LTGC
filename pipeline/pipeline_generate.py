@@ -4,12 +4,13 @@ LTGC 流水线 - Step 3: 图像生成
 """
 import os
 import sys
+import shutil
 import argparse
 import pandas as pd
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from config import DESCRIPTIONS_DIR, DATA_DIR
+from config import DESCRIPTIONS_DIR, DATA_DIR, DESCRIPTION_EXAMPLE_DIR
 from model.clip_score import score
 from model.image_gen import generate
 from data_txt.imagenet_label_mapping import get_readable_name
@@ -23,25 +24,38 @@ def parse_args():
     parser.add_argument('-d', '--data_dir', default=DATA_DIR, help='Output root')
     parser.add_argument('-t', '--thresh', default=0.25, type=float, help='CLIP score threshold')
     parser.add_argument('-r', '--max_rounds', default=3, type=int, help='Max retry rounds')
-    parser.add_argument('--interactive', action='store_true',
+    parser.add_argument('-i','--interactive', action='store_true',
                         help='交互模式：展示 CLIP 分数并让用户确认图像是否合格')
+    parser.add_argument('-m', '--md', default=None, nargs='?', const=DESCRIPTION_EXAMPLE_DIR,
+                        help='Markdown 示例记录模式：记录 class, description, image, clip score')
     return parser.parse_args()
 
+def save_generation_markdown(records, output_dir):
+    """将生成的图像示例保存为 Markdown 文件
 
-def ask_user(img_path, clip_score, class_name):
-    """交互式确认图像是否合格"""
-    print(f"\n{'='*50}")
-    print(f"  类别: {class_name}")
-    print(f"  CLIP 分数: {clip_score:.4f}")
-    print(f"  图像路径: {img_path}")
-    print(f"{'='*50}")
-    while True:
-        answer = input("  该图像是否合格？(y/n): ").strip().lower()
-        if answer in ('y', 'yes'):
-            return True
-        if answer in ('n', 'no'):
-            return False
-        print("  请输入 y 或 n")
+    Args:
+        records: list of (class_name, description, img_path, clip_score)
+        output_dir: 输出目录
+    """
+    os.makedirs(output_dir, exist_ok=True)
+    md_path = os.path.join(output_dir, "generation_examples.md")
+
+    with open(md_path, "w", encoding="utf-8") as f:
+        f.write("# Generation Examples\n\n")
+        f.write(f"Total examples: {len(records)}\n\n")
+
+        for i, (class_name, description, img_path, clip_score) in enumerate(records):
+            img_filename = f"gen_{i}_{class_name.replace(' ', '_')}.jpg"
+            shutil.copy(img_path, os.path.join(output_dir, img_filename))
+
+            f.write(f"## Example {i+1}: {class_name}\n\n")
+            f.write(f"**Class:** {class_name}  \n")
+            f.write(f"**Description:** {description}  \n")
+            f.write(f"![Image]({img_filename})  \n")
+            f.write(f"**CLIP Score:** {clip_score:.4f}  \n\n")
+            f.write("---\n\n")
+
+    print(f"[save_generation_markdown] Examples saved to {md_path}")
 
 
 def main():
@@ -49,6 +63,8 @@ def main():
 
     df = pd.read_csv(args.extended_description_path, header=None, names=['label', 'text'])
     grouped = df.groupby('label')['text'].apply(list).to_dict()
+
+    md_records = []
 
     total = len(grouped)
     for label_idx, (label, texts) in enumerate(grouped.items()):
@@ -60,9 +76,6 @@ def main():
 
         for text_i, text in enumerate(texts):
             saved_path = os.path.join(dir_path, f"{label}_{text_i}.JPEG")
-            if os.path.exists(saved_path):
-                print(f"[generate] Skip: {saved_path}")
-                continue
 
             accepted = False
             for attempt in range(args.max_rounds):
@@ -71,18 +84,19 @@ def main():
                     continue
 
                 clip_score = score(img_path, f"A photo of a {class_name.lower()}")
-                print(f"[generate] Attempt {attempt + 1}/{args.max_rounds}, Score: {clip_score:.4f}")
+                print(f"[generate] Class {label} ({label_idx + 1}/{total}): Attempt {attempt + 1}/{args.max_rounds}, Score: {clip_score:.4f}")
 
                 clip_pass = clip_score >= args.thresh
 
-                if args.interactive:
-                    user_pass = ask_user(img_path, clip_score, class_name)
-                    if user_pass:
-                        print(f"[generate] 用户确认合格 ✓")
+             
+                if args.md is not None:
+                    if clip_pass:
+                        print(f"[generate] Score {clip_score:.4f} >= {args.thresh}, accepted (md mode)")
+                        md_records.append((class_name, text, img_path, clip_score))
                         accepted = True
                         break
                     else:
-                        print(f"[generate] 用户认为不合格，重试...")
+                        print(f"[generate] Score {clip_score:.4f} < {args.thresh}")
                 else:
                     if clip_pass:
                         print(f"[generate] Score {clip_score:.4f} >= {args.thresh}, accepted")
@@ -94,6 +108,8 @@ def main():
             if not accepted:
                 print(f"[generate] 所有尝试均未通过，跳过该描述")
 
+    if md_records:
+        save_generation_markdown(md_records, args.md)
     print(f"[generate] Done. {total} classes processed.")
 
 

@@ -121,10 +121,8 @@ def extend_descriptions(existing_texts, prompt, max_token=TEXT_LLM_MAX_TOKENS, t
     response = _generate(messages, max_tokens=max_token, temperature=temperature)
 
     sentences = re.split(r'\n\d+[\.\)]\s*|\n-\s*|\n', response)
-    sentences = [s.strip() for s in sentences if s.strip() and s.strip().startswith('A photo')]
-    if not sentences:
-        sentences = [response]
-    return sentences
+    return [s.strip() for s in sentences if s.strip() and s.strip().startswith('A photo')]
+
 
 
 def refection_descriptions(texts, prompt, max_token=TEXT_LLM_MAX_TOKENS, temperature=0.2):
@@ -135,7 +133,8 @@ def refection_descriptions(texts, prompt, max_token=TEXT_LLM_MAX_TOKENS, tempera
         {"role": "user", "content": f"Existing descriptions:\n{existing_block}\n\n{prompt}"},
     ]
     response = _generate(messages, max_tokens=max_token, temperature=temperature, do_sample=False)
-    return [s.strip() for s in response.split("\n") if s.strip()]
+    sentences = re.split(r'\n\d+[\.\)]\s*|\n-\s*|\n', response)
+    return [s.strip() for s in sentences if s.strip() and s.strip().startswith('A photo')]
 
 
 def refine_description(text, class_name):

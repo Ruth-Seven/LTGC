@@ -13,7 +13,7 @@ from torchvision import transforms
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from config import IMAGENET_DIR, DESCRIPTIONS_DIR
+from config import IMAGENET_DIR, DESCRIPTIONS_DIR, DESCRIPTION_EXAMPLE_DIR
 from data.data_loader import ImageNetLTDataLoader
 from data_txt.imagenet_label_mapping import get_readable_name
 from model.vision_lmm import describe_image
@@ -38,7 +38,7 @@ def parse_args():
                         default=os.path.join(DESCRIPTIONS_DIR, 'existing_description_list.csv'),
                         help='Output CSV path')
     parser.add_argument('--examples-dir',
-                        default=os.path.join('/root/tobacco-experiment/model/LTGC/example', 'description_examples'),
+                        default=DESCRIPTION_EXAMPLE_DIR, 'description_examples'),
                         help='Directory to save example markdown with images')
     parser.add_argument('-t', '--test', action='store_true', help='Run in test mode with limited examples')
     return parser.parse_args()

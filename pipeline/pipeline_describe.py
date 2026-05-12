@@ -22,7 +22,7 @@ from tqdm import tqdm
 
 
 text_prompt = (
-            "Please use the Template to briefly describe the image of the class {name} in olny one sentence. Template:\n"
+            "Please use the Template to briefly describe the image of the class {name} in only one sentence. Template:\n"
             "'A photo of the class {name}, with [distinctive features], [specific scenes].'\n"
         )
 
@@ -40,7 +40,7 @@ def parse_args():
     parser.add_argument('--examples-dir',
                         default=os.path.join('/root/tobacco-experiment/model/LTGC/example', 'description_examples'),
                         help='Directory to save example markdown with images')
-    parser.add_argument('-t', '--test', default=False, help='Run in test mode with limited examples')
+    parser.add_argument('-t', '--test', action='store_true', help='Run in test mode with limited examples')
     return parser.parse_args()
 
 def describe_example_markdown(examples, output_dir):
@@ -136,7 +136,7 @@ def main():
         pbar.set_postfix(tail=tail_count, batch=processed, original_cls_num=class_counts.get(str(cls_id), 0))
         pbar.update(1)
         
-        if(test and len(example_classes) > 29):
+        if args.test and len(example_classes) > 29:
             break
     pbar.close()
 

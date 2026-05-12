@@ -67,16 +67,7 @@ def describe_image(image_tensor, text_prompt, max_retries=2):
             model, processor = _load_model()
             image = _tensor_to_pil(image_tensor)
 
-            conversation = [
-                {
-                    "role": "user",
-                    "content": [
-                        {"type": "image"},
-                        {"type": "text", "text": text_prompt},
-                    ],
-                },
-            ]
-            prompt = processor.apply_chat_template(conversation, add_generation_prompt=True)
+            prompt = f"USER: <image>\n{text_prompt}\nASSISTANT:"
             inputs = processor(images=image, text=prompt, return_tensors="pt")
             input_ids = inputs['input_ids'].to(model.device)
             pixel_values = inputs['pixel_values'].to(model.device)

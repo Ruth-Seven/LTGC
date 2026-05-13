@@ -10,24 +10,25 @@ import pandas as pd
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from config import DESCRIPTIONS_DIR, DATA_DIR, DESCRIPTION_EXAMPLE_DIR
-from model.clip_score import score
-from model.image_gen import generate
+from config import DESCRIPTIONS_DIR, DATA_DIR, GENERATION_EXAMPLE_DIR, EXTENDED_DESCRIPTION_PATH,CLIP_MAX_TOKENS
+from model.clip_score import score, score_batch
+from model.image_gen import generate, generate_batch
 from data_txt.imagenet_label_mapping import get_readable_name
 
 
 def parse_args():
     parser = argparse.ArgumentParser(description='LTGC Step 3: Text → Image')
     parser.add_argument('-ext', '--extended_description_path',
-                        default=os.path.join(DESCRIPTIONS_DIR, 'extended_description.csv'),
+                        default=EXTENDED_DESCRIPTION_PATH,
                         help='Extended descriptions CSV')
     parser.add_argument('-d', '--data_dir', default=DATA_DIR, help='Output root')
-    parser.add_argument('-t', '--thresh', default=0.25, type=float, help='CLIP score threshold')
-    parser.add_argument('-r', '--max_rounds', default=3, type=int, help='Max retry rounds')
-    parser.add_argument('-i','--interactive', action='store_true',
-                        help='交互模式：展示 CLIP 分数并让用户确认图像是否合格')
-    parser.add_argument('-m', '--md', default=None, nargs='?', const=DESCRIPTION_EXAMPLE_DIR,
+    parser.add_argument('-t', '--thresh', default=0.28, type=float, help='CLIP score threshold')
+    parser.add_argument('-r', '--max_rounds', default=5, type=int, help='Max retry rounds')
+    parser.add_argument('-m', '--md', default=None, nargs='?', const=GENERATION_EXAMPLE_DIR,
                         help='Markdown 示例记录模式：记录 class, description, image, clip score')
+    parser.add_argument('-o', '--onepath', action='store_true', help='让所有图片保存的同一个地址方便查看')
+    parser.add_argument('-b', '--batch', default=10, type=int, help='批量生成图片数量')
+
     return parser.parse_args()
 
 def save_generation_markdown(records, output_dir):
@@ -71,42 +72,77 @@ def main():
         class_name = get_readable_name(int(label)).split(", ")[0]
         dir_path = os.path.join(args.data_dir, 'gen_train', str(label))
         os.makedirs(dir_path, exist_ok=True)
-
+        texts = [t[:CLIP_MAX_TOKENS] for t in texts]
         print(f"[generate] Class {label} ({label_idx + 1}/{total}), {len(texts)} descriptions")
 
-        for text_i, text in enumerate(texts):
-            saved_path = os.path.join(dir_path, f"{label}_{text_i}.JPEG")
+        # ── onepath mode: 所有图存同个路径，逐张生成 ──
+        if args.onepath:
+            for text_i, text in enumerate(texts):
+                saved_path = os.path.join(args.data_dir, 'gen_train-onepath.JPEG')
+                accepted = False
+                for attempt in range(args.max_rounds):
+                    img_path = generate(text, saved_path)
+                    if img_path is None:
+                        continue
+                    clip_score = score(img_path, text)
+                    print(f"[generate] Class {label} ({label_idx + 1}/{total}): Attempt {attempt + 1}/{args.max_rounds}, Score: {clip_score:.4f} Class: {class_name}")
+                    if clip_score >= args.thresh:
+                        print(f"[generate] accepted")
+                        if args.md is not None:
+                            md_records.append((class_name, text, img_path, clip_score))
+                        accepted = True
+                        break
+                    else:
+                        print(f"[generate] Score {clip_score:.4f} < {args.thresh}")
+                if not accepted:
+                    print(f"[generate] 所有尝试均未通过，跳过该描述")
+            continue
 
-            accepted = False
+        # ── batch 模式（按 args.batch 分块）──
+        n = len(texts)
+        save_paths = [os.path.join(dir_path, f"{label}_{i}.JPEG") for i in range(n)]
+        accepted = [False] * n
+        bs = args.batch
+
+        for chunk_start in range(0, n, bs):
+            chunk_end = min(chunk_start + bs, n)
+            chunk_ids = list(range(chunk_start, chunk_end))
+            print(f"[generate]  Batch chunk [{chunk_start}:{chunk_end}]")
+
             for attempt in range(args.max_rounds):
-                img_path = generate(text, saved_path)
-                if img_path is None:
-                    continue
+                pending = [i for i in chunk_ids if not accepted[i]]
+                if not pending:
+                    break
 
-                clip_score = score(img_path, f"A photo of a {class_name.lower()}")
-                print(f"[generate] Class {label} ({label_idx + 1}/{total}): Attempt {attempt + 1}/{args.max_rounds}, Score: {clip_score:.4f}")
+                batch_prompts = [texts[i] for i in pending]
+                batch_paths = [save_paths[i] for i in pending]
+                img_paths = generate_batch(batch_prompts, batch_paths)
 
-                clip_pass = clip_score >= args.thresh
+                valid = [(i, p) for i, p in zip(pending, img_paths) if p is not None]
+                if not valid:
+                    break
 
-             
-                if args.md is not None:
-                    if clip_pass:
-                        print(f"[generate] Score {clip_score:.4f} >= {args.thresh}, accepted (md mode)")
-                        md_records.append((class_name, text, img_path, clip_score))
-                        accepted = True
-                        break
+                v_idx, v_paths = zip(*valid)
+                v_texts = [texts[i] for i in v_idx]
+
+                clip_scores = score_batch(list(v_paths), list(v_texts))
+
+                for idx, s in zip(v_idx, clip_scores):
+                    print(f"[generate] Class {label} ({label_idx + 1}/{total}): Attempt {attempt + 1}/{args.max_rounds}, Score: {s:.4f} Class: {class_name}")
+                    if s >= args.thresh:
+                        print(f"[generate] accepted")
+                        if args.md is not None:
+                            md_records.append((class_name, texts[idx], save_paths[idx], s))
+                        accepted[idx] = True
                     else:
-                        print(f"[generate] Score {clip_score:.4f} < {args.thresh}")
-                else:
-                    if clip_pass:
-                        print(f"[generate] Score {clip_score:.4f} >= {args.thresh}, accepted")
-                        accepted = True
-                        break
-                    else:
-                        print(f"[generate] Score {clip_score:.4f} < {args.thresh}")
+                        print(f"[generate] Score {s:.4f} < {args.thresh}")
 
-            if not accepted:
-                print(f"[generate] 所有尝试均未通过，跳过该描述")
+                if all(accepted[i] for i in chunk_ids):
+                    break
+
+        failed = sum(1 for a in accepted if not a)
+        if failed:
+            print(f"[generate] {failed}/{n} 张失败")
 
     if md_records:
         save_generation_markdown(md_records, args.md)

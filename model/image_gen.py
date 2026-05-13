@@ -6,7 +6,7 @@ import torch
 from diffusers import StableDiffusionPipeline, StableDiffusionXLPipeline
 import os
 
-from config import SD_MODEL_VERSION, SD_V1_5_PATH, SDXL_PATH, SD_IMAGE_SIZE, SD_NUM_INFERENCE_STEPS, SD_GUIDANCE_SCALE
+from config import SD_MODEL_VERSION, SD_V1_5_PATH, SDXL_PATH, SD_IMAGE_SIZE, SD_NUM_INFERENCE_STEPS, SD_GUIDANCE_SCALE, get_device
 
 
 _pipe = None
@@ -32,27 +32,33 @@ def _get_pipeline():
         safety_checker=None,
     )
     if torch.cuda.is_available():
-        _pipe = _pipe.to("cuda")
+        _pipe = _pipe.to(get_device("sd"))
     _version = SD_MODEL_VERSION
     print(f"[image_gen] {SD_MODEL_VERSION} loaded.")
     return _pipe, _version
 
 
 def generate(prompt, save_path=None):
-    """从文本描述生成图像
+    """从文本描述生成单张图像"""
+    return generate_batch([prompt], [save_path] if save_path else None)[0]
+
+
+def generate_batch(prompts, save_paths=None):
+    """从文本描述批量生成图像，UNet batch 并行
 
     Args:
-        prompt: 文本提示词
-        save_path: 保存路径，None 时不保存
+        prompts: 文本提示词列表
+        save_paths: 保存路径列表，长度与 prompts 一致
 
     Returns:
-        str or None: 保存路径 (成功) 或 None (失败)
+        list: 保存路径列表 (成功项为路径，失败项为 None)
     """
     try:
         pipe, version = _get_pipeline()
+        n = len(prompts)
 
         kwargs = dict(
-            prompt=prompt,
+            prompt=prompts,
             num_inference_steps=SD_NUM_INFERENCE_STEPS,
             guidance_scale=SD_GUIDANCE_SCALE,
         )
@@ -61,19 +67,26 @@ def generate(prompt, save_path=None):
             kwargs["width"] = SD_IMAGE_SIZE
 
         with torch.no_grad():
-            image = pipe(**kwargs).images[0]
+            images = pipe(**kwargs).images
 
-        if save_path:
-            os.makedirs(os.path.dirname(save_path), exist_ok=True)
-            image.save(save_path, "JPEG", quality=95)
-            print(f"[image_gen] Saved: {save_path}")
-            return save_path
+        results = []
+        for i in range(n):
+            path = save_paths[i] if save_paths else None
+            if path and i < len(images):
+                os.makedirs(os.path.dirname(path), exist_ok=True)
+                images[i].save(path, "JPEG", quality=95)
+                results.append(path)
+            elif path:
+                results.append(None)
+            else:
+                results.append(path)
 
-        return None
+        print(f"[image_gen] Batch generated {len(results)} images")
+        return results
 
     except Exception as e:
-        print(f"[image_gen] Failed: {e}")
-        return None
+        print(f"[image_gen] Batch failed: {e}")
+        return [None] * len(prompts)
 
 
 if __name__ == "__main__":

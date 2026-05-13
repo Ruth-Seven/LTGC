@@ -8,7 +8,7 @@ import torch
 import os
 from PIL import Image
 
-from config import CLIP_BACKEND, CLIP_LOCAL_MODEL_PATH, CLIP_MODEL_NAME
+from config import CLIP_BACKEND, CLIP_MODEL_NAME, get_device
 
 
 # ── OpenAI backend ─────────────────────────────────────────────
@@ -23,7 +23,7 @@ def _load_openai():
         return _openai_model, _openai_preprocess, _device
 
     import clip
-    _device = "cuda" if torch.cuda.is_available() else "cpu"
+    _device = get_device("clip") if torch.cuda.is_available() else "cpu"
     print(f"[clip_score] Loading OpenAI CLIP (ViT-B/32) on {_device}...")
     _openai_model, _openai_preprocess = clip.load("ViT-B/32", device=_device)
     print("[clip_score] CLIP loaded.")
@@ -57,10 +57,10 @@ def _load_hf():
         return _hf_model, _hf_processor, _device
 
     from transformers import CLIPModel, CLIPProcessor
-    _device = "cuda" if torch.cuda.is_available() else "cpu"
+    _device = get_device("clip") if torch.cuda.is_available() else "cpu"
     print(f"[clip_score] Loading HF CLIP ({CLIP_MODEL_NAME}) on {_device}...")
-    _hf_model = CLIPModel.from_pretrained(CLIP_MODEL_NAME).to(_device)
-    _hf_processor = CLIPProcessor.from_pretrained(CLIP_MODEL_NAME)
+    _hf_model = CLIPModel.from_pretrained(CLIP_MODEL_NAME, local_files_only=True).to(_device)
+    _hf_processor = CLIPProcessor.from_pretrained(CLIP_MODEL_NAME, local_files_only=True)
     print("[clip_score] CLIP loaded.")
     return _hf_model, _hf_processor, _device
 
@@ -73,10 +73,21 @@ def _score_hf(image_path, text):
 
     with torch.no_grad():
         outputs = model(**inputs)
-        logits_per_image = outputs.logits_per_image
-        similarity = torch.sigmoid(logits_per_image)
+        similarity = torch.nn.functional.cosine_similarity(outputs.image_embeds, outputs.text_embeds)
 
     return similarity.item()
+
+
+def _score_hf_batch(image_paths, texts):
+    model, processor, device = _load_hf()
+
+    images = [Image.open(path).convert("RGB") for path in image_paths]
+    inputs = processor(text=texts, images=images, return_tensors="pt", padding=True).to(device)
+
+    with torch.no_grad():
+        outputs = model(**inputs)
+        similarities = torch.nn.functional.cosine_similarity(outputs.image_embeds, outputs.text_embeds)
+    return similarities.tolist()
 
 
 # ── Dispatch ───────────────────────────────────────────────────
@@ -101,3 +112,22 @@ def score(image_path, text):
 
     print(f"[clip_score] {s:.4f}")
     return s
+
+
+def score_batch(image_paths, texts):
+    """批量计算生成图像与文本的余弦相似度
+
+    Args:
+        image_paths: 图像文件路径列表
+        texts: 文本描述列表
+
+    Returns:
+        list: 余弦相似度列表 (0~1)
+    """
+    if CLIP_BACKEND == "huggingface":
+        scores = _score_hf_batch(image_paths, texts)
+    else:
+        raise ValueError("Batch scoring is only supported for HuggingFace backend")
+
+    print(f"[clip_scores] batch: {[f'{s:.4f}' for s in scores]}")
+    return scores

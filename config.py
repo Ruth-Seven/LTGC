@@ -3,6 +3,8 @@
 管理 DeepSeek API、本地 VLM (LLaVA)、Stable Diffusion 等所有配置项
 """
 import os
+import time
+import torch
 from pathlib import Path
 
 # ============================================================
@@ -17,6 +19,33 @@ if _env_file.exists():
                 key, val = line.split("=", 1)
                 os.environ.setdefault(key.strip(), val.strip())
 
+
+# ============================================================
+# GPU 分配（LRU 算法）
+# ============================================================
+class _LRUAllocator:
+    def __init__(self):
+        
+        n = torch.cuda.device_count()
+        if n == 0:
+            self.id_que = [-1] # CPU 模式
+        else:
+            self.id_que = [i for i in range(n)]
+
+    def allocate(self):
+        gpu_id = self.id_que[0]
+        if gpu_id == -1:
+            return f"cpu"
+
+        self.id_que.pop(0)
+        self.id_que.append(gpu_id)
+        print(f"分配到cuda {gpu_id}.\n")
+        return f"cuda:{gpu_id}"
+
+_gpu_alloc = _LRUAllocator()
+
+def get_device(model_key=None):
+    return _gpu_alloc.allocate()
 
 # ============================================================
 # 本地 VLM (LLaVA) 配置
@@ -42,9 +71,10 @@ DEEPSEEK_TEMPERATURE = 0.8
 # ============================================================
 # CLIP 配置
 # ============================================================
-CLIP_BACKEND = "huggingface"    # "openai" (原生clip库) 或 "huggingface" (transformers)
-CLIP_LOCAL_MODEL_PATH = "//data/model/hub/models--openai--clip-vit-base-patch32"  # 仅在 CLIP_BACKEND="huggingface" 且不使用在线模型时有效
-CLIP_MODEL_NAME = "openai/clip-vit-base-patch32"
+CLIP_BACKEND="huggingface"    # "openai" (原生clip库) 或 "huggingface" (transformers)
+# CLIP_MODEL_NAME="openai/clip-vit-base-patch32"
+CLIP_MODEL_NAME="openai/clip-vit-large-patch14"
+CLIP_MAX_TOKENS = 77 - 2
 # ============================================================
 # Stable Diffusion 配置
 # ============================================================
@@ -62,7 +92,8 @@ DATA_DIR = "/data"
 PWD=os.path.abspath(os.path.dirname(__file__))
 DESCRIPTIONS_DIR = os.path.join(DATA_DIR, "descriptions_data")
 GENERATION_EXAMPLE_DIR=os.path.join(PWD, "example/generation_examples")
-DESCRIPTION_EXAMPLE_DIR=os.path.join(PWD, "exampledescription_examples")
+DESCRIPTION_EXAMPLE_DIR=os.path.join(PWD, "example/description_examples")
+EXTENDED_DESCRIPTION_PATH=os.path.join(DESCRIPTIONS_DIR, 'extended_description.csv')
 GEN_TRAIN_DIR = os.path.join(DATA_DIR, "gen_train")
 IMAGENET_DIR = "/data/imagenet-lt/torch_image_folder/mnt/volume_sfo3_01/imagenet-lt/ImageDataset"
 

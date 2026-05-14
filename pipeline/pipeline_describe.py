@@ -38,7 +38,7 @@ def parse_args():
                         default=os.path.join(DESCRIPTIONS_DIR, 'existing_description_list.csv'),
                         help='Output CSV path')
     parser.add_argument('--examples-dir',
-                        default=DESCRIPTION_EXAMPLE_DIR, 'description_examples'),
+                        default=DESCRIPTION_EXAMPLE_DIR,
                         help='Directory to save example markdown with images')
     parser.add_argument('-t', '--test', action='store_true', help='Run in test mode with limited examples')
     return parser.parse_args()

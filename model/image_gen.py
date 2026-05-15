@@ -43,6 +43,16 @@ def generate(prompt, save_path=None):
     return generate_batch([prompt], [save_path] if save_path else None)[0]
 
 
+def unload_sd():
+    """卸载 SD pipeline 释放显存"""
+    global _pipe, _version
+    if _pipe is not None:
+        _pipe = None
+        _version = None
+        torch.cuda.empty_cache()
+        print("[image_gen] SD unloaded, cache cleared.")
+
+
 def generate_batch(prompts, save_paths=None):
     """从文本描述批量生成图像，UNet batch 并行
 
@@ -53,40 +63,46 @@ def generate_batch(prompts, save_paths=None):
     Returns:
         list: 保存路径列表 (成功项为路径，失败项为 None)
     """
-    try:
-        pipe, version = _get_pipeline()
-        n = len(prompts)
+    n = len(prompts)
+    for attempt in range(2):
+        try:
+            pipe, version = _get_pipeline()
 
-        kwargs = dict(
-            prompt=prompts,
-            num_inference_steps=SD_NUM_INFERENCE_STEPS,
-            guidance_scale=SD_GUIDANCE_SCALE,
-        )
-        if version == "sdxl":
-            kwargs["height"] = SD_IMAGE_SIZE
-            kwargs["width"] = SD_IMAGE_SIZE
+            kwargs = dict(
+                prompt=prompts,
+                num_inference_steps=SD_NUM_INFERENCE_STEPS,
+                guidance_scale=SD_GUIDANCE_SCALE,
+            )
+            if version == "sdxl":
+                kwargs["height"] = SD_IMAGE_SIZE
+                kwargs["width"] = SD_IMAGE_SIZE
 
-        with torch.no_grad():
-            images = pipe(**kwargs).images
+            with torch.no_grad():
+                images = pipe(**kwargs).images
 
-        results = []
-        for i in range(n):
-            path = save_paths[i] if save_paths else None
-            if path and i < len(images):
-                os.makedirs(os.path.dirname(path), exist_ok=True)
-                images[i].save(path, "JPEG", quality=95)
-                results.append(path)
-            elif path:
-                results.append(None)
+            results = []
+            for i in range(n):
+                path = save_paths[i] if save_paths else None
+                if path and i < len(images):
+                    os.makedirs(os.path.dirname(path), exist_ok=True)
+                    images[i].save(path, "JPEG", quality=95)
+                    results.append(path)
+                elif path:
+                    results.append(None)
+                else:
+                    results.append(path)
+
+            print(f"[image_gen] Batch generated {len(results)} images")
+            return results
+
+        except Exception as e:
+            if attempt == 0:
+                print(f"[image_gen] Batch failed (attempt 1/2): {e}")
+                print(f"[image_gen] Unloading SD and retrying...")
+                unload_sd()
             else:
-                results.append(path)
-
-        print(f"[image_gen] Batch generated {len(results)} images")
-        return results
-
-    except Exception as e:
-        print(f"[image_gen] Batch failed: {e}")
-        return [None] * len(prompts)
+                print(f"[image_gen] Batch failed (attempt 2/2): {e}")
+                return [None] * n
 
 
 if __name__ == "__main__":

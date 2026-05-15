@@ -12,7 +12,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from config import DESCRIPTIONS_DIR, DATA_DIR, GENERATION_EXAMPLE_DIR, EXTENDED_DESCRIPTION_PATH,CLIP_MAX_TOKENS
 from model.clip_score import score, score_batch
-from model.image_gen import generate, generate_batch
+from model.image_gen import generate, generate_batch, unload_sd
 from data_txt.imagenet_label_mapping import get_readable_name
 
 
@@ -100,7 +100,7 @@ def main():
 
         # ── batch 模式（按 args.batch 分块）──
         n = len(texts)
-        save_paths = [os.path.join(dir_path, f"{label}_{i}.JPEG") for i in range(n)]
+        save_paths = [os.path.join(dir_path, f"{label}", f"{label}_{i}.JPEG") for i in range(n)]
         accepted = [False] * n
         bs = args.batch
 
@@ -143,6 +143,8 @@ def main():
         failed = sum(1 for a in accepted if not a)
         if failed:
             print(f"[generate] {failed}/{n} 张失败")
+
+        unload_sd()
 
     if md_records:
         save_generation_markdown(md_records, args.md)

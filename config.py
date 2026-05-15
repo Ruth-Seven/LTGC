@@ -56,17 +56,17 @@ VLM_MAX_TOKENS = 200
 # ============================================================
 # Text LLM (描述扩展) 配置
 # ============================================================
-TEXT_LLM_BACKEND = "api"       # "local" (Qwen) 或 "api" (DeepSeek)
+
 # local llm 配置
-TEXT_LLM_MODEL_ID = "/data/model/Qwen_Qwen2.5-7B-Instruct"
+TEXT_LLM_MODEL_ID = "Qwen/Qwen3-8B"
 TEXT_LLM_MAX_TOKENS = 10000
 TEXT_LLM_TEMPERATURE = 0.8
 # api llm 配置
-DEEPSEEK_API_KEY = os.environ.get("DEEPSEEK_API_KEY", "Replace with your DeepSeek API Key")
-DEEPSEEK_API_ENDPOINT = "https://api.deepseek.com/chat/completions"
-DEEPSEEK_CHAT_MODEL = "deepseek-v4-flash"
-DEEPSEEK_MAX_TOKENS = 10000
-DEEPSEEK_TEMPERATURE = 0.8
+# DEEPSEEK_API_KEY = os.environ.get("DEEPSEEK_API_KEY", "Replace with your DeepSeek API Key")
+# DEEPSEEK_API_ENDPOINT = "https://api.deepseek.com/chat/completions"
+# DEEPSEEK_CHAT_MODEL = "deepseek-v4-flash"
+# DEEPSEEK_MAX_TOKENS = 10000
+# DEEPSEEK_TEMPERATURE = 0.8
 
 # ============================================================
 # CLIP 配置

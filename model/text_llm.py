@@ -11,9 +11,7 @@ import json
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from config import (
-    TEXT_LLM_BACKEND, TEXT_LLM_MODEL_ID, TEXT_LLM_MAX_TOKENS, TEXT_LLM_TEMPERATURE,
-    DEEPSEEK_API_KEY, DEEPSEEK_API_ENDPOINT, DEEPSEEK_CHAT_MODEL,
-    get_deepseek_headers,
+    TEXT_LLM_MODEL_ID, TEXT_LLM_MAX_TOKENS, TEXT_LLM_TEMPERATURE,
 )
 
 _model = None
@@ -71,42 +69,10 @@ def _generate_local(messages, max_tokens, temperature, do_sample, top_p):
     return response.strip()
 
 
-# ── API backend (DeepSeek) ─────────────────────────────────────
-
-def _generate_api(messages, max_tokens, temperature, do_sample, top_p):
-    headers = get_deepseek_headers()
-
-    payload = {
-        "model": DEEPSEEK_CHAT_MODEL,
-        "messages": messages,
-        "max_tokens": max_tokens,
-        "temperature": temperature,
-    }
-    if not do_sample:
-        payload["temperature"] = 0.0
-
-    try:
-        resp = requests.post(
-            DEEPSEEK_API_ENDPOINT,
-            headers=headers,
-            json=payload,
-            timeout=120,
-        )
-        resp.raise_for_status()
-        result = resp.json()
-        return result["choices"][0]["message"]["content"].strip()
-    except Exception as e:
-        print(f"[text_llm] DeepSeek API error: {e}")
-        return ""
-
-
 # ── Dispatch ───────────────────────────────────────────────────
 
 def _generate(messages, max_tokens=TEXT_LLM_MAX_TOKENS, temperature=TEXT_LLM_TEMPERATURE, do_sample=True, top_p=0.9):
-    if TEXT_LLM_BACKEND == "api":
-        return _generate_api(messages, max_tokens, temperature, do_sample, top_p)
-    else:
-        return _generate_local(messages, max_tokens, temperature, do_sample, top_p)
+    return _generate_local(messages, max_tokens, temperature, do_sample, top_p)
 
 
 # ── Public API ─────────────────────────────────────────────────

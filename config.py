@@ -3,6 +3,9 @@
 管理 DeepSeek API、本地 VLM (LLaVA)、Stable Diffusion 等所有配置项
 """
 import os
+
+os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
+
 import time
 import torch
 from pathlib import Path

@@ -77,8 +77,8 @@ def _generate(messages, max_tokens=TEXT_LLM_MAX_TOKENS, temperature=TEXT_LLM_TEM
 
 # ── Public API ─────────────────────────────────────────────────
 
-def extend_descriptions(existing_texts, prompt, max_token=TEXT_LLM_MAX_TOKENS, temperature=TEXT_LLM_TEMPERATURE):
-    """基于已有描述生成新的多样化描述"""
+def extend_descriptions(existing_texts, prompt, number, max_token=TEXT_LLM_MAX_TOKENS, temperature=TEXT_LLM_TEMPERATURE):
+    """基于已有描述生成新的多样化描述，截断到 number"""
     existing_block = "\n".join(f"- {t}" for t in existing_texts)
     messages = [
         {"role": "system", "content": SYSTEM_PROMPT},
@@ -87,20 +87,22 @@ def extend_descriptions(existing_texts, prompt, max_token=TEXT_LLM_MAX_TOKENS, t
     response = _generate(messages, max_tokens=max_token, temperature=temperature)
 
     sentences = re.split(r'\n\d+[\.\)]\s*|\n-\s*|\n', response)
-    return [s.strip() for s in sentences if s.strip() and s.strip().startswith('A photo')]
+    result = [s.strip() for s in sentences if s.strip() and s.strip().startswith('A photo')]
+    return result[:number]
 
 
 
-def refection_descriptions(texts, prompt, max_token=TEXT_LLM_MAX_TOKENS, temperature=0.2):
-    """去重/精炼描述列表"""
+def refection_descriptions(texts, prompt, number, max_token=TEXT_LLM_MAX_TOKENS, temperature=0.2):
+    """去重/精炼描述列表，截断到 number"""
     existing_block = "\n".join(f"- {t}" for t in texts)
     messages = [
         {"role": "system", "content": SYSTEM_PROMPT},
         {"role": "user", "content": f"Existing descriptions:\n{existing_block}\n\n{prompt}"},
     ]
     response = _generate(messages, max_tokens=max_token, temperature=temperature, do_sample=False)
-    sentences = re.split(r'\n\d+[\.\)]\s*|\n-\s*|\n', response)
-    return [s.strip() for s in sentences if s.strip() and s.strip().startswith('A photo')]
+    sentences = re.split(r'\n\d+[\.\)]\s*', response)
+    result = [s.strip() for s in sentences if s.strip() and s.strip().startswith('A photo')]
+    return result[:number]
 
 
 def refine_description(text, class_name):

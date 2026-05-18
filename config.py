@@ -65,11 +65,12 @@ TEXT_LLM_MODEL_ID = "Qwen/Qwen3-8B"
 TEXT_LLM_MAX_TOKENS = 10000
 TEXT_LLM_TEMPERATURE = 0.8
 # api llm 配置
-# DEEPSEEK_API_KEY = os.environ.get("DEEPSEEK_API_KEY", "Replace with your DeepSeek API Key")
-# DEEPSEEK_API_ENDPOINT = "https://api.deepseek.com/chat/completions"
-# DEEPSEEK_CHAT_MODEL = "deepseek-v4-flash"
-# DEEPSEEK_MAX_TOKENS = 10000
-# DEEPSEEK_TEMPERATURE = 0.8
+DEEPSEEK_API_KEY = os.environ.get("DEEPSEEK_API_KEY", "Replace with your DeepSeek API Key")
+DEEPSEEK_API_ENDPOINT = "https://api.deepseek.com/chat/completions"
+DEEPSEEK_VISION_MODEL = "deepseek-chat"
+DEEPSEEK_CHAT_MODEL = "deepseek-chat"
+DEEPSEEK_MAX_TOKENS = 300
+DEEPSEEK_TEMPERATURE = 0.7
 
 # ============================================================
 # CLIP 配置
@@ -84,6 +85,7 @@ CLIP_MAX_TOKENS = 77 - 2
 SD_MODEL_VERSION = "sdxl"       # "v1_5" 或 "sdxl"
 SD_V1_5_PATH = "/data/model/runwayml_stable-diffusion-v1-5"
 SDXL_PATH = "/data/model/stable-diffusion-xl-base-1.0"
+SD_MODEL_ID = "runwayml/stable-diffusion-v1-5"
 SD_IMAGE_SIZE = 1024
 SD_NUM_INFERENCE_STEPS = 30
 SD_GUIDANCE_SCALE = 7.5
@@ -98,7 +100,9 @@ GENERATION_EXAMPLE_DIR=os.path.join(PWD, "example/generation_examples")
 DESCRIPTION_EXAMPLE_DIR=os.path.join(PWD, "example/description_examples")
 EXTENDED_DESCRIPTION_PATH=os.path.join(DESCRIPTIONS_DIR, 'extended_description.csv')
 GEN_TRAIN_DIR = os.path.join(DATA_DIR, "gen_train")
-IMAGENET_DIR = "/data/imagenet-lt/torch_image_folder/mnt/volume_sfo3_01/imagenet-lt/ImageDataset"
+IMAGENET_DIR = "/data/dataset/imagenet-lt/torch_image_folder/mnt/volume_sfo3_01/imagenet-lt/ImageDataset"
+TEST_IMAGE_PATH = os.path.join(DATA_DIR, "test.jpg")
+CLASS_COUNT_FILE = os.path.join(DATA_DIR, "imagenetlt_class_count.json")
 
 os.makedirs(DESCRIPTIONS_DIR, exist_ok=True)
 os.makedirs(GEN_TRAIN_DIR, exist_ok=True)

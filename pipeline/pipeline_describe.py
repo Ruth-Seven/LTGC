@@ -13,7 +13,7 @@ from torchvision import transforms
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from config import IMAGENET_DIR, DESCRIPTIONS_DIR, DESCRIPTION_EXAMPLE_DIR
+from config import IMAGENET_DIR, DESCRIPTIONS_DIR, DESCRIPTION_EXAMPLE_DIR, CLASS_COUNT_FILE
 from data.data_loader import ImageNetLTDataLoader
 from data_txt.imagenet_label_mapping import get_readable_name
 from model.vision_lmm import describe_image
@@ -32,7 +32,7 @@ def parse_args():
     parser.add_argument('-d', '--data_dir', default=IMAGENET_DIR, help='Dataset root')
     parser.add_argument('-m', '--tail_num_threshold', default=50, type=int, help='Tail class threshold')
     parser.add_argument('-f', '--class_number_file',
-                        default='/root/tobacco-experiment/model/LTGC/data_txt/ImageNet_LT/imagenetlt_class_count.txt',
+                        default=CLASS_COUNT_FILE,
                         help='Class count file')
     parser.add_argument('-exi', '--existing_description_path',
                         default=os.path.join(DESCRIPTIONS_DIR, 'existing_description_list.csv'),

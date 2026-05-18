@@ -116,13 +116,12 @@ def store_cal_res(zip_res, thresh, md_records, class_name):
     if zip_res is None:
         return
     for img_path, text, clip_score in zip_res:
-    clip_pass = clip_score >= args.thresh
-        if clip_pass:
-            print(f"[generate] Score {clip_score:.4f} >= {args.thresh}, accepted (md mode)")
-            if  md_records is not None:
+        if clip_score >= thresh:
+            print(f"[generate] Score {clip_score:.4f} >= {thresh}, accepted (md mode)")
+            if md_records is not None:
                 md_records.append((class_name, text, img_path, clip_score))
         else:
-            print(f"[generate] Score {clip_score:.4f} < {args.thresh}, denied")
+            print(f"[generate] Score {clip_score:.4f} < {thresh}, denied")
             add_fail_batch(img_path, text)
 
 def main():

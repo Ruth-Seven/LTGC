@@ -13,6 +13,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from config import DESCRIPTIONS_DIR, DATA_DIR, GENERATION_EXAMPLE_DIR, EXTENDED_DESCRIPTION_PATH,CLIP_MAX_TOKENS
 from model.clip_score import score, score_batch
 from model.image_gen import generate, generate_batch, unload_sd
+from model.text_llm import refine_description
 from data_txt.imagenet_label_mapping import get_readable_name
 
 
@@ -70,7 +71,7 @@ def main():
     total = len(grouped)
     for label_idx, (label, texts) in enumerate(grouped.items()):
         class_name = get_readable_name(int(label)).split(", ")[0]
-        dir_path = os.path.join(args.data_dir, 'gen_train', str(label))
+        dir_path = os.path.join(args.data_dir, str(label))
         os.makedirs(dir_path, exist_ok=True)
         texts = [t[:CLIP_MAX_TOKENS] for t in texts]
         print(f"[generate] Class {label} ({label_idx + 1}/{total}), {len(texts)} descriptions")
@@ -94,13 +95,18 @@ def main():
                         break
                     else:
                         print(f"[generate] Score {clip_score:.4f} < {args.thresh}")
+                        if attempt < args.max_rounds - 1:
+                            refined = refine_description(text, class_name)
+                            if refined:
+                                print(f"[generate] Refined description: {refined}")
+                                text = refined
                 if not accepted:
                     print(f"[generate] 所有尝试均未通过，跳过该描述")
             continue
 
         # ── batch 模式（按 args.batch 分块）──
         n = len(texts)
-        save_paths = [os.path.join(dir_path, f"{label}", f"{label}_{i}.JPEG") for i in range(n)]
+        save_paths = [os.path.join(dir_path, f"{label}_{i}.JPEG") for i in range(n)]
         accepted = [False] * n
         bs = args.batch
 
@@ -136,6 +142,15 @@ def main():
                         accepted[idx] = True
                     else:
                         print(f"[generate] Score {s:.4f} < {args.thresh}")
+
+                # refine failed descriptions before next retry
+                if attempt < args.max_rounds - 1:
+                    for i in chunk_ids:
+                        if not accepted[i]:
+                            refined = refine_description(texts[i], class_name)
+                            if refined:
+                                print(f"[generate] Refined: {refined}")
+                                texts[i] = refined
 
                 if all(accepted[i] for i in chunk_ids):
                     break

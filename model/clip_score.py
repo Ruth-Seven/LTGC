@@ -69,7 +69,7 @@ def _score_hf(image_path, text):
     model, processor, device = _load_hf()
 
     image = Image.open(image_path).convert("RGB")
-    inputs = processor(text=[text], images=image, return_tensors="pt", padding=True).to(device)
+    inputs = processor(text=[text], images=image, return_tensors="pt", padding=True, truncation=True).to(device)
 
     with torch.no_grad():
         outputs = model(**inputs)
@@ -82,7 +82,7 @@ def _score_hf_batch(image_paths, texts):
     model, processor, device = _load_hf()
 
     images = [Image.open(path).convert("RGB") for path in image_paths]
-    inputs = processor(text=texts, images=images, return_tensors="pt", padding=True).to(device)
+    inputs = processor(text=texts, images=images, return_tensors="pt", padding=True, truncation=True).to(device)
 
     with torch.no_grad():
         outputs = model(**inputs)

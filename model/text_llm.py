@@ -1,8 +1,6 @@
 """
 文本生成模块
-支持两种后端:
-  - "local": 本地 Qwen2.5-7B-Instruct
-  - "api": DeepSeek Chat API (deepseek-chat)
+使用本地 Qwen3-8B 模型进行文本生成。
 """
 import torch
 import re
@@ -87,12 +85,18 @@ def extend_descriptions(existing_texts, prompt, number, max_token=TEXT_LLM_MAX_T
     response = _generate(messages, max_tokens=max_token, temperature=temperature)
 
     sentences = re.split(r'\n\d+[\.\)]\s*|\n-\s*|\n', response)
-    result = [s.strip() for s in sentences if s.strip() and s.strip().startswith('A photo')]
+    result = []
+    for s in sentences:
+        s = s.strip()
+        if s.startswith('A photo'):
+            s = s.split('\n')[0].strip()
+            if s:
+                result.append(s)
     return result[:number]
 
 
 
-def refection_descriptions(texts, prompt, number, max_token=TEXT_LLM_MAX_TOKENS, temperature=0.2):
+def reflection_descriptions(texts, prompt, number, max_token=TEXT_LLM_MAX_TOKENS, temperature=0.2):
     """去重/精炼描述列表，截断到 number"""
     existing_block = "\n".join(f"- {t}" for t in texts)
     messages = [
@@ -100,8 +104,14 @@ def refection_descriptions(texts, prompt, number, max_token=TEXT_LLM_MAX_TOKENS,
         {"role": "user", "content": f"Existing descriptions:\n{existing_block}\n\n{prompt}"},
     ]
     response = _generate(messages, max_tokens=max_token, temperature=temperature, do_sample=False)
-    sentences = re.split(r'\n\d+[\.\)]\s*', response)
-    result = [s.strip() for s in sentences if s.strip() and s.strip().startswith('A photo')]
+    sentences = re.split(r'\n\d+[\.\)]\s*|\n-\s*|\n', response)
+    result = []
+    for s in sentences:
+        s = s.strip()
+        if s.startswith('A photo'):
+            s = s.split('\n')[0].strip()
+            if s:
+                result.append(s)
     return result[:number]
 
 
@@ -119,7 +129,10 @@ def refine_description(text, class_name):
             ),
         },
     ]
-    return _generate(messages, max_tokens=80, do_sample=False)
+    response = _generate(messages, max_tokens=80, do_sample=False)
+    if response.startswith('A photo'):
+        response = response.split('\n')[0].strip()
+    return response
 
 
 def generate_template(class_name):
@@ -134,4 +147,8 @@ def generate_template(class_name):
             ),
         },
     ]
-    return _generate(messages, max_tokens=50, do_sample=False)
+    response = _generate(messages, max_tokens=50, do_sample=False)
+    response = response.strip()
+    if response.startswith('A photo'):
+        response = response.split('\n')[0].strip()
+    return response

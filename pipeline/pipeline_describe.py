@@ -8,6 +8,7 @@ import json
 import csv
 import argparse
 import time
+import logging
 import torch
 from torchvision import transforms
 
@@ -18,7 +19,6 @@ from data.data_loader import ImageNetLTDataLoader
 from data_txt.imagenet_label_mapping import get_readable_name
 from model.vision_lmm import describe_image
 from utils import count_samples
-from tqdm import tqdm
 
 
 text_prompt = (
@@ -41,9 +41,22 @@ def parse_args():
                         default=DESCRIPTION_EXAMPLE_DIR,
                         help='Directory to save example markdown with images')
     parser.add_argument('-t', '--test', action='store_true', help='Run in test mode with limited examples')
+    parser.add_argument('--log_dir', type=str, default="/tmp",
+                        help='Log file directory')
     return parser.parse_args()
 
-def describe_example_markdown(examples, output_dir):
+
+def setup_logger(name, log_path):
+    logger = logging.getLogger(name)
+    logger.setLevel(logging.INFO)
+    fh = logging.FileHandler(log_path)
+    fh.setFormatter(logging.Formatter(
+        "[%(name)s %(asctime)s] %(message)s", datefmt="%H:%M:%S"
+    ))
+    logger.addHandler(fh)
+    return logger
+
+def describe_example_markdown(examples, output_dir, logger=None):
     """将尾部类描述示例保存为 Markdown 文件（含图片）
     
     Args:
@@ -58,7 +71,7 @@ def describe_example_markdown(examples, output_dir):
         f.write("# Tail Class Description Examples\n\n")
         f.write(f"Total examples: {len(examples)}\n\n")
 
-        for i, (cls_id, img_tensor, description, class_name) in enumerate(tqdm(examples, desc="[describe] Saving examples")):
+        for i, (cls_id, img_tensor, description, class_name) in enumerate(examples):
             img_filename = f"example_{cls_id}_{i}.jpg"
             img_path = os.path.join(output_dir, img_filename)
             img_tensor_cpu = img_tensor.squeeze(0).cpu().clamp(0, 1)
@@ -69,14 +82,17 @@ def describe_example_markdown(examples, output_dir):
             f.write(f"**Description:** {description}\n\n")
             f.write("---\n\n")
 
-    print(f"[describe_example_markdown] Examples saved to {md_path}")
+    (logger or logging.getLogger()).info("Examples saved to %s", md_path)
 
 
 
 def main():
     args = parse_args()
     os.makedirs(os.path.dirname(args.existing_description_path), exist_ok=True)
-    print("[start] Dataloading....")
+    os.makedirs(args.log_dir, exist_ok=True)
+    logger = setup_logger("describe", os.path.join(args.log_dir, "pipeline_describe.log"))
+
+    logger.info("Dataloading....")
     loader = ImageNetLTDataLoader(
         data_dir=args.data_dir,
         split='train',
@@ -102,12 +118,11 @@ def main():
 
     mean = torch.tensor([0.485, 0.456, 0.406]).view(1, 3, 1, 1)
     std = torch.tensor([0.229, 0.224, 0.225]).view(1, 3, 1, 1)
-    print("[Describe] Starting image description generation for tail classes...")
+    logger.info("Starting image description generation for tail classes...")
     description_file = args.existing_description_path
     if os.path.exists(description_file):
-        print(f"[describe] Backuping existing description file: {description_file}")
+        logger.info("Backuping existing description file: %s", description_file)
         os.rename(description_file, description_file + "_" + time.strftime("%Y%m%d-%H%M%S"))
-    pbar = tqdm(total=total, desc="[describe] Processing", unit="img")
     for pack in loader:
         data, target, index = pack
         cls_id = int(target)
@@ -133,21 +148,18 @@ def main():
                     data_to_write = []
 
         processed += 1
-        pbar.set_postfix(tail=tail_count, batch=processed, original_cls_num=class_counts.get(str(cls_id), 0))
-        pbar.update(1)
         
         if args.test and len(example_classes) > 29:
             break
-    pbar.close()
 
     if data_to_write:
         with open(args.existing_description_path, 'a', newline='') as f:
             csv.writer(f).writerows(data_to_write)
 
     if examples:
-        describe_example_markdown(examples, args.examples_dir)
+        describe_example_markdown(examples, args.examples_dir, logger)
 
-    print(f"[describe] Done. Total: {processed}, Tail: {tail_count}, Output: {args.existing_description_path}")
+    logger.info("Done. Total: %d, Tail: %d, Output: %s", processed, tail_count, args.existing_description_path)
 
 
 if __name__ == "__main__":

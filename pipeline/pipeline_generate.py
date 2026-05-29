@@ -30,6 +30,8 @@ def parse_args():
                         help='Number of GPUs (0=auto, 1=single GPU)')
     parser.add_argument('--log_dir', type=str, default="/tmp",
                         help='Log file directory for worker processes')
+    parser.add_argument('--class-mapping', type=str, default=None,
+                        help='JSON class name mapping file')
     return parser.parse_args()
 
 
@@ -73,13 +75,24 @@ def _worker(gpu_id, class_list, args):
     from model.clip_score import score, score_batch
     from model.image_gen import generate, generate_batch, unload_sd
     from model.text_llm import refine_description, _unload_model as unload_text_llm
-    from data_txt.imagenet_label_mapping import get_readable_name
+    from data_txt.imagenet_label_mapping import get_readable_name as _imagenet_class_name
+
+    _class_map = None
+    if args.class_mapping and os.path.exists(args.class_mapping):
+        import json
+        with open(args.class_mapping) as f:
+            _class_map = json.load(f)
+
+    def _class_name(label):
+        if _class_map is not None:
+            return str(_class_map.get(str(label), label))
+        return _imagenet_class_name(int(label)).split(", ")[0]
 
     md_records = []
     total = len(class_list)
 
     for label_idx, (label, texts) in enumerate(class_list):
-        class_name = get_readable_name(int(label)).split(", ")[0]
+        class_name = _class_name(label)
         dir_path = os.path.join(args.data_dir, str(label))
         os.makedirs(dir_path, exist_ok=True)
         texts = [f'A photo of a {class_name}' for t in texts]

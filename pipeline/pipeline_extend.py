@@ -7,13 +7,23 @@ import sys
 import csv
 import argparse
 import logging
+import json
 import pandas as pd
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from config import DESCRIPTIONS_DIR
 from model.text_llm import extend_descriptions, reflection_descriptions, _unload_model
-from data_txt.imagenet_label_mapping import get_readable_name
+from data_txt.imagenet_label_mapping import get_readable_name as _imagenet_class_name
+
+_CLASS_MAP = None
+
+
+def _get_class_name(label):
+    global _CLASS_MAP
+    if _CLASS_MAP is not None:
+        return str(_CLASS_MAP.get(str(label), label))
+    return _imagenet_class_name(int(label)).split(", ")[0]
 
 extension_prompt = f"""Besides these descriptions mentioned above, please use the Template 1 to list exactly {{number}} other possible [distinctive features] and [specific scenes].
 Template1: A photo of the class {{class_name}}, [with distinctive features] [in specific scenes]. 
@@ -47,11 +57,19 @@ def parse_args():
                         help='Output extended CSV')
     parser.add_argument('--log_dir', type=str, default="/tmp",
                         help='Log file directory')
+    parser.add_argument('--class-mapping', type=str, default=None,
+                        help='JSON class name mapping file (e.g. {"0":"crazing"})')
     return parser.parse_args()
 
 
 def main():
     args = parse_args()
+    global _CLASS_MAP
+    if args.class_mapping and os.path.exists(args.class_mapping):
+        with open(args.class_mapping) as f:
+            _CLASS_MAP = json.load(f)
+        print(f"[extend] Loaded class mapping: {len(_CLASS_MAP)} entries")
+
     os.makedirs(os.path.dirname(args.extended_description_path), exist_ok=True)
     os.makedirs(args.log_dir, exist_ok=True)
     logger = setup_logger("extend", os.path.join(args.log_dir, "pipeline_extend.log"))
@@ -61,7 +79,7 @@ def main():
     extension_descriptions = {}
     total = len(grouped)
     for idx, (label, texts) in enumerate(grouped.items()):
-        class_name = get_readable_name(int(label)).split(", ")[0]
+        class_name = _get_class_name(label)
         logger.info("Class %s %s (%d/%d): %d existing", label, class_name, idx + 1, total, len(texts))
         extension_descriptions[label] = []
         while len(texts) + len(extension_descriptions[label]) < args.max_generate_num*2:

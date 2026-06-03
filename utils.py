@@ -4,6 +4,7 @@
 from collections import Counter
 from tqdm import tqdm
 import json
+import re
 
 
 def count_samples(dataloader, output_path=None):
@@ -19,3 +20,42 @@ def count_samples(dataloader, output_path=None):
     if output_path:
         with open(output_path, 'w') as f:
             f.write(json.dumps(dict(class_counts), indent=4))
+
+
+NON_PHOTO_PATTERNS = [
+    r"\ba painting of\b",
+    r"\ba drawing of\b",
+    r"\ba sketch of\b",
+    r"\ban illustration of\b",
+    r"\ba cartoon of\b",
+    r"\ba sculpture of\b",
+    r"\ba render[ing]* of\b",
+    r"\ba screenshot of\b",
+]
+_photo_check = re.compile("|".join(NON_PHOTO_PATTERNS), re.IGNORECASE)
+
+
+def validate_description(description, class_name):
+    """校验 LLaVA 生成的描述是否符合 LTGC 模板格式。
+
+    规则:
+    1. 必须以 "A photo of" 开头 (不允许 painting/drawing 等)
+    2. 必须包含 "class {class_name}" (保留模板类名标识)
+
+    Returns:
+        bool: True 表示通过校验
+    """
+    if not description or not isinstance(description, str):
+        return False
+    desc = description.strip()
+
+    if not re.match(r"^A photo of", desc, re.IGNORECASE):
+        return False
+
+    if _photo_check.search(desc):
+        return False
+
+    if f"class {class_name}" not in desc.lower():
+        return False
+
+    return True

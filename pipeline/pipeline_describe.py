@@ -23,7 +23,7 @@ from config import IMAGENET_DIR, DESCRIPTIONS_DIR, DESCRIPTION_EXAMPLE_DIR, CLAS
 from data.data_loader import ImageNetLTDataset, SUPPORTED_EXTENSIONS
 from data_txt.imagenet_label_mapping import get_readable_name
 from model.vision_lmm import describe_image_batch
-from utils import validate_description
+from utils import validate_description, cleanup_stale_parts
 from collections import defaultdict, Counter
 
 
@@ -334,6 +334,8 @@ def main():
     os.makedirs(os.path.dirname(args.existing_description_path), exist_ok=True)
     os.makedirs(args.log_dir, exist_ok=True)
     logger = setup_logger("describe", os.path.join(args.log_dir, "pipeline_describe.log"))
+
+    cleanup_stale_parts(args.existing_description_path, logger)
 
     description_file = args.existing_description_path
     tmp_file = description_file + ".tmp"

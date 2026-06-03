@@ -18,6 +18,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from config import DESCRIPTIONS_DIR
 from data_txt.imagenet_label_mapping import get_readable_name as _imagenet_class_name
+from utils import cleanup_stale_parts
 
 extension_prompt = "Besides these descriptions mentioned above, please use the Template 1 to list exactly {number} other possible [distinctive features] and [specific scenes].\nTemplate1: A photo of the class {class_name}, [with distinctive features] [in specific scenes]. \nList the selected sentences numbered from 1 to {number}, one per line. Do not output more than {number} descriptions."
 
@@ -158,6 +159,8 @@ def main():
     os.makedirs(os.path.dirname(args.extended_description_path), exist_ok=True)
     os.makedirs(args.log_dir, exist_ok=True)
     logger = setup_logger("extend", os.path.join(args.log_dir, "pipeline_extend.log"))
+
+    cleanup_stale_parts(args.extended_description_path, logger)
 
     df = pd.read_csv(args.existing_description_path, header=None, names=['label', 'text'])
     grouped = sorted(df.groupby('label')['text'].apply(list).items())

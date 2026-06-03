@@ -4,6 +4,7 @@
 from collections import Counter
 from tqdm import tqdm
 import json
+import os
 import re
 
 
@@ -59,3 +60,20 @@ def validate_description(description, class_name):
         return False
 
     return True
+
+
+def cleanup_stale_parts(output_path, logger=None):
+    """删除指定输出路径的所有 *.part* 后缀文件（上次运行残留）
+
+    Args:
+        output_path: 主输出文件路径，part 文件名为 output_path.part{rank}
+        logger: 可选的 logging.Logger，输出删除信息
+    """
+    import glob as _glob
+    for stale in _glob.glob(f"{output_path}.part*"):
+        try:
+            os.remove(stale)
+            if logger:
+                logger.info("Removed stale part: %s", stale)
+        except OSError:
+            pass

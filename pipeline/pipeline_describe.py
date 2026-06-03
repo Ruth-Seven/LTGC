@@ -119,6 +119,7 @@ def _ddp_worker(rank, world_size, args_dict):
                 rank, world_size, args_dict.get('batch_size', 6))
 
     transform = transforms.Compose([
+        transforms.Resize((224, 224)),
         transforms.ToTensor(),
     ])
 
@@ -221,6 +222,7 @@ def _main_single_gpu(args, logger):
 
     logger.info("Dataloading (single-GPU, batch_size=%d)...", args.batch_size)
     transform = transforms.Compose([
+        transforms.Resize((224, 224)),
         transforms.ToTensor(),
     ])
     dataset = ImageNetLTDataset(args.data_dir, split='train', transform=transform)

@@ -120,6 +120,10 @@ def _merge_parts(output_path, num_gpus, logger):
                     writer.writerow(row)
                     merged += 1
     os.rename(tmp_path, output_path)
+    for gpu_id in range(num_gpus):
+        part_path = f"{output_path}.part{gpu_id}"
+        if os.path.exists(part_path):
+            os.remove(part_path)
     logger.info("Merged %d rows into %s", merged, output_path)
 
 

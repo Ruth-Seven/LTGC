@@ -9,7 +9,7 @@ import shutil
 import argparse
 import logging
 import pandas as pd
-import multiprocessing as mp
+import torch.multiprocessing as mp
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -64,12 +64,12 @@ def save_generation_markdown(records, output_dir):
     print(f"[save_generation_markdown] Examples saved to {md_path}")
 
 
-def _worker(gpu_id, class_list, args):
-    os.environ["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
+def _worker(rank, world_size, class_chunks, args):
+    os.environ["CUDA_VISIBLE_DEVICES"] = str(rank)
 
     os.makedirs(args.log_dir, exist_ok=True)
-    log_path = os.path.join(args.log_dir, f"generate_gpu_{gpu_id}.log")
-    logger = setup_logger(f"GPU{gpu_id}", log_path)
+    log_path = os.path.join(args.log_dir, f"generate_gpu_{rank}.log")
+    logger = setup_logger(f"GPU{rank}", log_path)
 
     from config import GENERATION_EXAMPLE_DIR
     from model.clip_score import score, score_batch
@@ -89,6 +89,7 @@ def _worker(gpu_id, class_list, args):
         return _imagenet_class_name(int(label)).split(", ")[0]
 
     md_records = []
+    class_list = class_chunks[rank]
     total = len(class_list)
 
     for label_idx, (label, texts) in enumerate(class_list):
@@ -183,7 +184,7 @@ def _worker(gpu_id, class_list, args):
             logger.info("%d/%d failed", failed, n)
 
     if md_records and args.md is not None:
-        save_generation_markdown(md_records, os.path.join(args.md, f"gpu_{gpu_id}"))
+        save_generation_markdown(md_records, os.path.join(args.md, f"gpu_{rank}"))
     logger.info("Done. %d classes processed.", total)
 
 
@@ -211,7 +212,7 @@ def main():
     grouped = sorted(df.groupby('label')['text'].apply(list).items())
 
     if num_gpus <= 1:
-        _worker(0, grouped, args)
+        _worker(0, 1, [grouped], args)
         return
 
     print(f"[generate] Using {num_gpus} GPUs, {len(grouped)} classes total")
@@ -219,26 +220,12 @@ def main():
     for i, item in enumerate(grouped):
         chunks[i % num_gpus].append(item)
 
-    ctx = mp.get_context("spawn")
-    procs = []
-    for gpu_id in range(num_gpus):
-        if not chunks[gpu_id]:
-            continue
-        p = ctx.Process(target=_worker, args=(gpu_id, chunks[gpu_id], args), daemon=True)
-        p.start()
-        procs.append(p)
-
-    try:
-        for p in procs:
-            p.join()
-    except KeyboardInterrupt:
-        print("\n[generate] Interrupted, stopping all workers...")
-        for p in procs:
-            if p.is_alive():
-                p.terminate()
-        for p in procs:
-            p.join(timeout=5)
-        print("[generate] All workers stopped.")
+    mp.spawn(
+        _worker,
+        args=(num_gpus, chunks, args),
+        nprocs=num_gpus,
+        join=True,
+    )
 
     print(f"[generate] All GPUs done.")
 

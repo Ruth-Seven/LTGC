@@ -11,6 +11,7 @@ import csv
 import argparse
 import time
 import logging
+import glob
 import torch
 import torch.distributed as dist
 import torch.multiprocessing as mp
@@ -333,6 +334,9 @@ def main():
     if os.path.exists(tmp_file):
         logger.info("Removing stale temp file: %s", tmp_file)
         os.remove(tmp_file)
+    for stale in glob(f"{description_file}.part*"):
+        logger.info("Removing stale part file: %s", stale)
+        os.remove(stale)
     if os.path.exists(description_file):
         logger.info("Backuping existing description file: %s", description_file)
         os.rename(description_file, description_file + "_" + time.strftime("%Y%m%d-%H%M%S"))

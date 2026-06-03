@@ -10,7 +10,7 @@ import csv
 import argparse
 import logging
 import json
-import multiprocessing as mp
+import torch.multiprocessing as mp
 
 import pandas as pd
 
@@ -43,15 +43,16 @@ def _get_class_name(label, class_map):
     return _imagenet_class_name(int(label)).split(", ")[0]
 
 
-def _extend_worker(gpu_id, class_list, max_generate_num, output_base, log_dir, class_map):
-    os.environ["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
+def _extend_worker(rank, world_size, class_chunks, max_generate_num, output_base, log_dir, class_map):
+    os.environ["CUDA_VISIBLE_DEVICES"] = str(rank)
 
     os.makedirs(log_dir, exist_ok=True)
-    logger = setup_logger(f"extend_gpu{gpu_id}", os.path.join(log_dir, f"pipeline_extend_gpu{gpu_id}.log"))
+    logger = setup_logger(f"extend_gpu{rank}", os.path.join(log_dir, f"pipeline_extend_gpu{rank}.log"))
 
     from model.text_llm import extend_descriptions, reflection_descriptions, _unload_model
 
-    part_path = f"{output_base}.part{gpu_id}"
+    class_list = class_chunks[rank]
+    part_path = f"{output_base}.part{rank}"
     total = len(class_list)
     data_to_write = []
 
@@ -98,7 +99,7 @@ def _extend_worker(gpu_id, class_list, max_generate_num, output_base, log_dir, c
         with open(part_path, 'a', newline='') as f:
             csv.writer(f).writerows(data_to_write)
 
-    logger.info("GPU %d done. %d classes processed.", gpu_id, total)
+    logger.info("GPU %d done. %d classes processed.", rank, total)
     _unload_model()
 
 
@@ -160,7 +161,7 @@ def main():
 
     num_gpus = args.num_gpus
     if num_gpus <= 1:
-        _extend_worker(0, grouped, args.max_generate_num,
+        _extend_worker(0, 1, [grouped], args.max_generate_num,
                        args.extended_description_path, args.log_dir, class_map)
         return
 
@@ -169,32 +170,13 @@ def main():
     for i, item in enumerate(grouped):
         chunks[i % num_gpus].append(item)
 
-    ctx = mp.get_context("spawn")
-    procs = []
-    for gpu_id in range(num_gpus):
-        if not chunks[gpu_id]:
-            continue
-        p = ctx.Process(
-            target=_extend_worker,
-            args=(gpu_id, chunks[gpu_id], args.max_generate_num,
-                  args.extended_description_path, args.log_dir, class_map),
-            daemon=True,
-        )
-        p.start()
-        procs.append(p)
-
-    try:
-        for p in procs:
-            p.join()
-    except KeyboardInterrupt:
-        print("\n[extend] Interrupted, stopping all workers...")
-        for p in procs:
-            if p.is_alive():
-                p.terminate()
-        for p in procs:
-            p.join(timeout=5)
-        print("[extend] All workers stopped.")
-        return
+    mp.spawn(
+        _extend_worker,
+        args=(num_gpus, chunks, args.max_generate_num,
+              args.extended_description_path, args.log_dir, class_map),
+        nprocs=num_gpus,
+        join=True,
+    )
 
     _merge_parts(args.extended_description_path, num_gpus, logger)
     logger.info("Done. Output: %s", args.extended_description_path)

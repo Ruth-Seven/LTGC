@@ -27,6 +27,14 @@ from utils import count_samples, validate_description
 from collections import defaultdict
 
 
+def collate_no_stack(batch):
+    """不堆叠 image tensor，保持 list 以支持不同尺寸的图片"""
+    images = [item[0] for item in batch]
+    targets = torch.tensor([item[1] for item in batch])
+    indices = torch.tensor([item[2] for item in batch])
+    return images, targets, indices
+
+
 text_prompt = (
     "Please use the Template to briefly describe the image of the class {name} in only one sentence. Template:\n"
     "'A photo of the class {name}, with [distinctive features], [specific scenes].'\n"
@@ -119,13 +127,18 @@ def _ddp_worker(rank, world_size, args_dict):
                 rank, world_size, args_dict.get('batch_size', 6))
 
     transform = transforms.Compose([
-        transforms.Resize((224, 224)),
         transforms.ToTensor(),
     ])
 
     dataset = ImageNetLTDataset(args_dict['data_dir'], split='train', transform=transform)
     sampler = DistributedSampler(
         dataset, num_replicas=world_size, rank=rank, shuffle=False, drop_last=False
+    )
+    batch_size = args_dict.get('batch_size', 6)
+    loader = DataLoader(
+        dataset, sampler=sampler, batch_size=batch_size,
+        num_workers=args_dict.get('num_workers', 4), pin_memory=True,
+        collate_fn=collate_no_stack,
     )
     batch_size = args_dict.get('batch_size', 6)
     loader = DataLoader(
@@ -138,6 +151,7 @@ def _ddp_worker(rank, world_size, args_dict):
 
     output_base = args_dict['existing_description_path']
     part_path = f"{output_base}.part{rank}"
+    open(part_path, 'w').close()
     data_to_write = []
     examples = []
     example_classes = set()
@@ -148,7 +162,7 @@ def _ddp_worker(rank, world_size, args_dict):
     threshold = args_dict['tail_num_threshold']
     test_mode = args_dict.get('test', False)
 
-    for data, target, index in loader:
+    for data_list, target, index in loader:
         B = len(target)
 
         groups = defaultdict(list)
@@ -160,7 +174,7 @@ def _ddp_worker(rank, world_size, args_dict):
 
         for (cls_id, name), indices in groups.items():
             G = len(indices)
-            group_imgs = [data[i] for i in indices]
+            group_imgs = [data_list[i] for i in indices]
             prompts = [text_prompt.format(name=name)] * G
             descriptions = describe_image_batch(group_imgs, prompts)
 
@@ -171,7 +185,7 @@ def _ddp_worker(rank, world_size, args_dict):
 
                     if cls_id not in example_classes and len(example_classes) < max_examples:
                         example_classes.add(cls_id)
-                        examples.append((cls_id, data[i].clone(), desc, name))
+                        examples.append((cls_id, data_list[i].clone(), desc, name))
 
                 if len(data_to_write) >= 10:
                     with open(part_path, 'a', newline='') as f:
@@ -222,13 +236,13 @@ def _main_single_gpu(args, logger):
 
     logger.info("Dataloading (single-GPU, batch_size=%d)...", args.batch_size)
     transform = transforms.Compose([
-        transforms.Resize((224, 224)),
         transforms.ToTensor(),
     ])
     dataset = ImageNetLTDataset(args.data_dir, split='train', transform=transform)
     loader = DataLoader(
         dataset, batch_size=args.batch_size, shuffle=False,
-        num_workers=args.num_workers, pin_memory=True
+        num_workers=args.num_workers, pin_memory=True,
+        collate_fn=collate_no_stack,
     )
 
     if not os.path.exists(args.class_number_file):
@@ -247,7 +261,7 @@ def _main_single_gpu(args, logger):
 
     logger.info("Starting image description generation for tail classes...")
 
-    for data, target, index in loader:
+    for data_list, target, index in loader:
         B = len(target)
 
         groups = defaultdict(list)
@@ -259,7 +273,7 @@ def _main_single_gpu(args, logger):
 
         for (cls_id, name), indices in groups.items():
             G = len(indices)
-            group_imgs = [data[i] for i in indices]
+            group_imgs = [data_list[i] for i in indices]
             prompts = [text_prompt.format(name=name)] * G
             descriptions = describe_image_batch(group_imgs, prompts)
 
@@ -270,7 +284,7 @@ def _main_single_gpu(args, logger):
 
                     if cls_id not in example_classes and len(example_classes) < args.examples_len:
                         example_classes.add(cls_id)
-                        examples.append((cls_id, data[i].clone(), desc, name))
+                        examples.append((cls_id, data_list[i].clone(), desc, name))
 
                 if len(data_to_write) >= 10:
                     with open(tmp_file, 'a', newline='') as f:

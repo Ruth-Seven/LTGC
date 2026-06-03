@@ -53,7 +53,8 @@ def get_device(model_key=None):
 # ============================================================
 # 本地 VLM (LLaVA) 配置
 # ============================================================
-LOCAL_VLM_ID = "/data/model/llava-hf_llava-1.5-13b-hf"
+# LOCAL_VLM_ID = "/data/model/llava-hf_llava-1.5-7b-hf"
+LOCAL_VLM_ID = "/data/model/llava-hf_llava-1.5-7b-hf"
 VLM_MAX_TOKENS = 200
 
 # ============================================================

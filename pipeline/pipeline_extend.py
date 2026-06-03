@@ -100,11 +100,13 @@ def main():
             logger.info("  - %s", des)
         logger.info("Class %s %s: generated %d (total: %d)", label, class_name, len(extension_descriptions[label]), len(texts))
 
-    with open(args.extended_description_path, 'a', newline='') as f:
+    tmp_path = args.extended_description_path + ".tmp"
+    with open(tmp_path, 'w', newline='') as f:
         writer = csv.writer(f)
         for label, deses in extension_descriptions.items():
             for des in deses:
                 writer.writerow([label, des])
+    os.rename(tmp_path, args.extended_description_path)
 
     _unload_model()
 

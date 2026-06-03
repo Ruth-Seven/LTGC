@@ -62,42 +62,67 @@ def describe_image(image_tensor, text_prompt, max_retries=2):
     Returns:
         str: 生成的描述文本，失败时返回空字符串
     """
+    results = describe_image_batch([image_tensor], [text_prompt], max_retries)
+    return results[0] if results else ""
+
+
+def describe_image_batch(image_tensors, text_prompts, max_retries=2):
+    """批量图像描述，一次 forward 处理多张图。
+
+    Args:
+        image_tensors: list of Tensor, 每个形状 (C,H,W), [0,1]
+        text_prompts:  list of str, 与 image_tensors 一一对应
+        max_retries:   最大重试次数
+
+    Returns:
+        list of str: 生成的描述列表，与输入一一对应，失败位置返回 ""
+    """
+    B = len(image_tensors)
+    if B == 0:
+        return [""] * B
+
     for attempt in range(max_retries):
         try:
             model, processor = _load_model()
-            image = _tensor_to_pil(image_tensor)
+            images = [_tensor_to_pil(t) for t in image_tensors]
+            prompts = [f"USER: <image>\n{p}\nASSISTANT:" for p in text_prompts]
 
-            prompt = f"USER: <image>\n{text_prompt}\nASSISTANT:"
-            inputs = processor(images=image, text=prompt, return_tensors="pt")
+            inputs = processor(images=images, text=prompts, return_tensors="pt", padding=True)
             input_ids = inputs['input_ids'].to(model.device)
             pixel_values = inputs['pixel_values'].to(model.device)
+            attention_mask = inputs['attention_mask'].to(model.device)
+            input_lengths = attention_mask.sum(dim=1)
 
             with torch.no_grad():
                 output = model.generate(
                     input_ids=input_ids,
                     pixel_values=pixel_values,
+                    attention_mask=attention_mask,
                     max_new_tokens=VLM_MAX_TOKENS,
                     do_sample=False,
                 )
 
-            response = processor.decode(
-                output[0][input_ids.shape[1]:],
-                skip_special_tokens=True
-            )
-            return response.strip()
+            responses = [
+                processor.decode(output[i][input_lengths[i]:], skip_special_tokens=True).strip()
+                for i in range(B)
+            ]
+            return responses
 
         except torch.cuda.OutOfMemoryError:
-            print(f"[vision_llm] CUDA OOM (attempt {attempt + 1}/{max_retries})")
+            print(f"[vision_llm] CUDA OOM batch (attempt {attempt + 1}/{max_retries})")
             torch.cuda.empty_cache()
         except RuntimeError as e:
             if "CUDA out of memory" in str(e):
-                print(f"[vision_llm] CUDA OOM (attempt {attempt + 1}/{max_retries})")
+                print(f"[vision_llm] CUDA OOM batch (attempt {attempt + 1}/{max_retries})")
                 torch.cuda.empty_cache()
             else:
                 print(f"[vision_llm] Runtime error: {e}")
                 break
         except Exception as e:
-            print(f"[vision_llm] Inference failed (attempt {attempt + 1}/{max_retries}): {e}")
+            print(f"[vision_llm] Batch inference failed (attempt {attempt + 1}/{max_retries}): {e}")
             if attempt < max_retries - 1:
                 time.sleep(1)
+
+    print("[vision_llm] All retries exhausted, returning empty batch")
+    return [""] * B
 

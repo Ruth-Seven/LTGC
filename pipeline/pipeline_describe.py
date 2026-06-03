@@ -118,8 +118,7 @@ def _ddp_worker(rank, world_size, args_dict):
     os.environ['MASTER_ADDR'] = 'localhost'
     os.environ['MASTER_PORT'] = str(args_dict['master_port'])
 
-    dist.init_process_group("nccl", rank=rank, world_size=world_size)
-    torch.cuda.set_device(0)
+    dist.init_process_group("gloo", rank=rank, world_size=world_size)
 
     log_dir = args_dict['log_dir']
     logger = setup_logger(f"describe_gpu{rank}", os.path.join(log_dir, f"pipeline_describe_gpu{rank}.log"))
@@ -137,7 +136,7 @@ def _ddp_worker(rank, world_size, args_dict):
     batch_size = args_dict.get('batch_size', 6)
     loader = DataLoader(
         dataset, sampler=sampler, batch_size=batch_size,
-        num_workers=args_dict.get('num_workers', 4), pin_memory=True,
+        num_workers=args_dict.get('num_workers', 4), pin_memory=False,
         collate_fn=collate_no_stack,
     )
 
@@ -200,6 +199,8 @@ def _ddp_worker(rank, world_size, args_dict):
         describe_example_markdown(examples, part_examples_dir, logger)
 
     logger.info("DDP rank %d done. Processed: %d, Tail: %d", rank, processed, tail_count)
+    del loader
+    torch.cuda.synchronize()
     dist.destroy_process_group()
 
 

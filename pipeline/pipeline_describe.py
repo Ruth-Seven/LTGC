@@ -20,11 +20,11 @@ from torchvision import transforms
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from config import IMAGENET_DIR, DESCRIPTIONS_DIR, DESCRIPTION_EXAMPLE_DIR, CLASS_COUNT_FILE
-from data.data_loader import ImageNetLTDataLoader, ImageNetLTDataset
+from data.data_loader import ImageNetLTDataset, SUPPORTED_EXTENSIONS
 from data_txt.imagenet_label_mapping import get_readable_name
 from model.vision_lmm import describe_image_batch
-from utils import count_samples, validate_description
-from collections import defaultdict
+from utils import validate_description
+from collections import defaultdict, Counter
 
 
 def collate_no_stack(batch):
@@ -241,12 +241,10 @@ def _main_single_gpu(args, logger):
     )
 
     if not os.path.exists(args.class_number_file):
-        count_samples(loader, output_path=args.class_number_file)
-        with open(args.class_number_file, 'r') as f:
-            class_counts = json.load(f)
-    else:
-        with open(args.class_number_file, 'r') as f:
-            class_counts = json.load(f)
+        logger.info("Pre-computing class counts from filesystem...")
+        _count_classes_from_fs(args.data_dir, args.class_number_file, logger)
+    with open(args.class_number_file, 'r') as f:
+        class_counts = json.load(f)
 
     data_to_write = []
     processed = 0
@@ -301,6 +299,23 @@ def _main_single_gpu(args, logger):
     logger.info("Single-GPU done. Processed: %d, Tail: %d, Output: %s", processed, tail_count, description_file)
 
 
+def _count_classes_from_fs(data_dir, class_number_file, logger):
+    """直接从目录结构统计各类别样本数（不走 DataLoader，极快）"""
+    class_counts = Counter()
+    train_dir = os.path.join(data_dir, "train")
+    for cls_name in os.listdir(train_dir):
+        cls_dir = os.path.join(train_dir, cls_name)
+        if os.path.isdir(cls_dir) and cls_name.isdigit():
+            count = sum(1 for f in os.listdir(cls_dir)
+                        if os.path.splitext(f)[1].lower() in SUPPORTED_EXTENSIONS)
+            if count > 0:
+                class_counts[int(cls_name)] = count
+    with open(class_number_file, 'w') as f:
+        json.dump(dict(sorted(class_counts.items())), f, indent=4)
+    logger.info("Class counts saved from FS scan: %d classes, %d total samples",
+                len(class_counts), sum(class_counts.values()))
+
+
 def main():
     args = parse_args()
     os.makedirs(os.path.dirname(args.existing_description_path), exist_ok=True)
@@ -320,12 +335,8 @@ def main():
         logger.info("Multi-GPU DDP mode: %d GPUs", args.num_gpus)
 
         if not os.path.exists(args.class_number_file):
-            logger.info("Pre-computing class counts...")
-            loader = ImageNetLTDataLoader(
-                data_dir=args.data_dir, split='train',
-                batch_size=1, shuffle=False, num_workers=args.num_workers,
-            )
-            count_samples(loader, output_path=args.class_number_file)
+            logger.info("Pre-computing class counts from filesystem...")
+            _count_classes_from_fs(args.data_dir, args.class_number_file, logger)
 
         master_port = _find_free_port()
         worker_args = {

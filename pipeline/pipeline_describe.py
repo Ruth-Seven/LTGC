@@ -11,7 +11,6 @@ import csv
 import argparse
 import time
 import logging
-import glob
 import torch
 import torch.distributed as dist
 import torch.multiprocessing as mp
@@ -147,6 +146,7 @@ def _ddp_worker(rank, world_size, args_dict):
 
     output_base = args_dict['existing_description_path']
     part_path = f"{output_base}.part{rank}"
+    # 创建/截断空文件，避免上次残留数据（即使主进程已清过，防御极端情况）
     open(part_path, 'w').close()
     data_to_write = []
     examples = []
@@ -201,6 +201,8 @@ def _ddp_worker(rank, world_size, args_dict):
         describe_example_markdown(examples, part_examples_dir, logger)
 
     logger.info("DDP rank %d done. Processed: %d, Tail: %d", rank, processed, tail_count)
+    # 先释放 DataLoader（shut down pin_memory workers）再同步 CUDA stream，
+    # 最后销毁 NCCL 进程组，三个操作顺序不可颠倒
     del loader
     torch.cuda.synchronize()
     dist.destroy_process_group()
@@ -307,7 +309,11 @@ def _main_single_gpu(args, logger):
 
 
 def _count_classes_from_fs(data_dir, class_number_file, logger):
-    """直接从目录结构统计各类别样本数（不走 DataLoader，极快）"""
+    """直接从目录结构统计各类别样本数（不走 DataLoader，极快）
+
+    ImageNet-LT 图片尺寸各异，DataLoader 默认 collate_fn 会 torch.stack
+    导致 crash。纯文件系统扫描不需要加载任何图片，0.2s 完成 11.6 万张统计。
+    """
     class_counts = Counter()
     train_dir = os.path.join(data_dir, "train")
     for cls_name in os.listdir(train_dir):
@@ -334,9 +340,6 @@ def main():
     if os.path.exists(tmp_file):
         logger.info("Removing stale temp file: %s", tmp_file)
         os.remove(tmp_file)
-    for stale in glob(f"{description_file}.part*"):
-        logger.info("Removing stale part file: %s", stale)
-        os.remove(stale)
     if os.path.exists(description_file):
         logger.info("Backuping existing description file: %s", description_file)
         os.rename(description_file, description_file + "_" + time.strftime("%Y%m%d-%H%M%S"))

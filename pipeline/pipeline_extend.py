@@ -10,7 +10,6 @@ import csv
 import argparse
 import logging
 import json
-import glob
 import torch.multiprocessing as mp
 
 import pandas as pd
@@ -54,6 +53,7 @@ def _extend_worker(rank, world_size, class_chunks, max_generate_num, output_base
 
     class_list = class_chunks[rank]
     part_path = f"{output_base}.part{rank}"
+    open(part_path, 'w').close()
     total = len(class_list)
     data_to_write = []
 
@@ -158,10 +158,6 @@ def main():
     os.makedirs(os.path.dirname(args.extended_description_path), exist_ok=True)
     os.makedirs(args.log_dir, exist_ok=True)
     logger = setup_logger("extend", os.path.join(args.log_dir, "pipeline_extend.log"))
-
-    for stale in glob.glob(f"{args.extended_description_path}.part*"):
-        logger.info("Removing stale part file: %s", stale)
-        os.remove(stale)
 
     df = pd.read_csv(args.existing_description_path, header=None, names=['label', 'text'])
     grouped = sorted(df.groupby('label')['text'].apply(list).items())

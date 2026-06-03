@@ -140,11 +140,6 @@ def _ddp_worker(rank, world_size, args_dict):
         num_workers=args_dict.get('num_workers', 4), pin_memory=True,
         collate_fn=collate_no_stack,
     )
-    batch_size = args_dict.get('batch_size', 6)
-    loader = DataLoader(
-        dataset, sampler=sampler, batch_size=batch_size,
-        num_workers=args_dict.get('num_workers', 4), pin_memory=True
-    )
 
     with open(args_dict['class_number_file'], 'r') as f:
         class_counts = json.load(f)

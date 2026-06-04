@@ -362,8 +362,9 @@ def _concat_class_examples(examples_dir, logger):
         cls_id = fname.split('.')[0]
         class_parts[cls_id].append(os.path.join(tmp_dir, fname))
     for cls_id, parts in class_parts.items():
-        md_path = os.path.join(examples_dir, f"{cls_id}.md")
         name = get_readable_name(int(cls_id)).split(", ")[0]
+        safe_name = name.replace(' ', '_').replace('/', '_')
+        md_path = os.path.join(examples_dir, f"{cls_id}_{safe_name}.md")
         os.makedirs(examples_dir, exist_ok=True)
         with open(md_path, 'w') as out:
             out.write(f"# Class {cls_id}: {name}\n\n")
@@ -382,7 +383,8 @@ def _save_single_gpu_examples(per_class, examples_dir, logger):
     os.makedirs(examples_dir, exist_ok=True)
     for cls_id, records in per_class.items():
         name = get_readable_name(cls_id).split(", ")[0]
-        md_path = os.path.join(examples_dir, f"{cls_id}.md")
+        safe_name = name.replace(' ', '_').replace('/', '_')
+        md_path = os.path.join(examples_dir, f"{cls_id}_{safe_name}.md")
         with open(md_path, 'w') as f:
             f.write(f"# Class {cls_id}: {name}\n\n")
             f.write(f"## Original Descriptions ({len(records)})\n\n")

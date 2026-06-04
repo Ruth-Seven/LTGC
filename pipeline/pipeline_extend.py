@@ -108,7 +108,8 @@ def _extend_worker(rank, world_size, class_chunks, max_generate_num, output_base
 
         if examples_dir and new_descs:
             os.makedirs(examples_dir, exist_ok=True)
-            md_path = os.path.join(examples_dir, f"{label}.md")
+            safe_name = class_name.replace(' ', '_').replace('/', '_')
+            md_path = os.path.join(examples_dir, f"{label}_{safe_name}.md")
             with open(md_path, 'a') as f:
                 f.write(f"\n## Extended Descriptions ({len(new_descs)})\n\n")
                 for k, desc in enumerate(new_descs, 1):

@@ -90,7 +90,7 @@ def extend_descriptions(existing_texts, prompt, number, max_token=TEXT_LLM_MAX_T
         s = s.strip()
         if s.startswith('A photo'):
             s = s.split('\n')[0].strip()
-            if s and s.count('[') == 0 and s.count(']') == 0 and ', with' in s.lower() and ', in' in s.lower():
+            if s and s.count('[') == 0 and s.count(']') == 0:
                 result.append(s)
     result = list(dict.fromkeys(result))
     return result[:number]
@@ -111,7 +111,7 @@ def reflection_descriptions(texts, prompt, number, max_token=TEXT_LLM_MAX_TOKENS
         s = s.strip()
         if s.startswith('A photo'):
             s = s.split('\n')[0].strip()
-            if s and s.count('[') == 0 and s.count(']') == 0 and ', with' in s.lower() and ', in' in s.lower():
+            if s and s.count('[') == 0 and s.count(']') == 0:
                 result.append(s)
     result = list(dict.fromkeys(result))
     return result[:number]

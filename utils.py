@@ -58,9 +58,6 @@ def validate_description(description, class_name):
 
     if f"class {class_name}" not in desc.lower():
         return False
-    
-    if not re.match(r", in [a-z\s]+\.$", desc, re.IGNORECASE):
-        return False
 
     return True
 

@@ -225,9 +225,11 @@ def _ddp_worker(rank, world_size, args_dict):
         logger.info("DDP rank %d wrote .part md for %d classes", rank, len(per_class))
 
     logger.info("DDP rank %d done. Processed: %d, Tail: %d", rank, processed, tail_count)
-    # 显式关闭 DataLoader worker（释放 pin_memory），同步 + 清空 CUDA cache，
-    # 确保 NCCL destroy 时无残留 CUDA 资源竞争
-    loader._shutdown_workers()
+
+    try:
+        loader._shutdown_workers()
+    except AttributeError:
+        pass
     del loader
     torch.cuda.synchronize()
     torch.cuda.empty_cache()

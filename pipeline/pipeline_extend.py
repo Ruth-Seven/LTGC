@@ -20,7 +20,7 @@ from config import DESCRIPTIONS_DIR
 from data_txt.imagenet_label_mapping import get_readable_name as _imagenet_class_name
 from utils import cleanup_stale_parts
 
-extension_prompt = "Besides these descriptions mentioned above, please use the Template 1 to list exactly {number} other possible [distinctive features] and [specific scenes].\nTemplate1: A photo of the class {class_name}, [with distinctive features] [in specific scenes]. \nList the selected sentences numbered from 1 to {number}, one per line. Do not output more than {number} descriptions."
+extension_prompt = "Besides these descriptions mentioned above, please use the Template 1 to list exactly {number} other possible [distinctive features] and [specific scenes].\nTemplate1: A photo of the class {class_name}, [with distinctive features] in [specific scenes]. \nList the selected sentences numbered from 1 to {number}, one per line. Do not output more than {number} descriptions."
 
 reflection_prompt = "From the provided description list, please select exactly {number} unique sentences for the class '{class_name}'. \nEach sentence must describe a different [distinctive feature] (e.g., texture, shape) or a [specific scene] (e.g., lighting, environment) to ensure diversity. Avoid near-duplicates.\nList the selected sentences numbered from 1 to {number}, one per line. Do not output more than {number} descriptions."
 
@@ -44,7 +44,7 @@ def _get_class_name(label, class_map):
     return _imagenet_class_name(int(label)).split(", ")[0]
 
 
-def _extend_worker(rank, world_size, class_chunks, max_generate_num, output_base, log_dir, class_map):
+def _extend_worker(rank, world_size, class_chunks, max_generate_num, output_base, log_dir, class_map, examples_dir):
     os.environ["CUDA_VISIBLE_DEVICES"] = str(rank)
 
     os.makedirs(log_dir, exist_ok=True)
@@ -64,17 +64,31 @@ def _extend_worker(rank, world_size, class_chunks, max_generate_num, output_base
 
         new_descs = []
         while len(texts) + len(new_descs) < max_generate_num * 2:
-            n_needed = max_generate_num * 2 - len(texts)
-            fresh = extend_descriptions(
-                texts,
+            all_texts = texts + new_descs
+            n_needed = max_generate_num * 2 - len(all_texts)
+            raw = extend_descriptions(
+                all_texts,
                 prompt=extension_prompt.format(number=n_needed, class_name=class_name),
                 number=n_needed,
+                max_token=3000,
             )
-            logger.info("Class %s %s: generated %d new descriptions", label, class_name, len(fresh))
+            logger.info("Class %s %s: generated %d raw descriptions", label, class_name, len(raw))
+            fresh = list(dict.fromkeys(raw))
+            if len(fresh) < len(raw):
+                logger.info("Class %s %s: dedup within batch removed %d duplicates",
+                            label, class_name, len(raw) - len(fresh))
+            fresh = [
+                d for d in fresh
+                if len(d) > 30
+                and '[' not in d and ']' not in d
+                and ', with' in d.lower()
+                and ', in' in d.lower()
+            ]
+            logger.info("Class %s %s: after quality filter %d descriptions", label, class_name, len(fresh))
             for desc in fresh:
                 logger.info("  - %s", desc)
             if not fresh:
-                logger.info("No new descriptions, stopping")
+                logger.info("No valid new descriptions, stopping")
                 break
             logger.info("Class %s %s: before reflection %d descriptions",
                         label, class_name, len(new_descs) + len(fresh))
@@ -91,6 +105,15 @@ def _extend_worker(rank, world_size, class_chunks, max_generate_num, output_base
         for desc in new_descs:
             logger.info("  - %s", desc)
             data_to_write.append((label, desc))
+
+        if examples_dir and new_descs:
+            os.makedirs(examples_dir, exist_ok=True)
+            md_path = os.path.join(examples_dir, f"{label}.md")
+            with open(md_path, 'a') as f:
+                f.write(f"\n## Extended Descriptions ({len(new_descs)})\n\n")
+                for k, desc in enumerate(new_descs, 1):
+                    f.write(f"{k}. {desc}\n")
+                f.write("\n")
 
         if len(data_to_write) >= 200:
             with open(part_path, 'a', newline='') as f:
@@ -145,6 +168,8 @@ def parse_args():
                         help='JSON class name mapping file (e.g. {"0":"crazing"})')
     parser.add_argument('--num_gpus', type=int, default=1,
                         help='Number of GPUs for class-level parallelism')
+    parser.add_argument('--examples-dir', type=str, default=None,
+                        help='Directory to save per-class Markdown (append Extended Descriptions section)')
     return parser.parse_args()
 
 
@@ -170,7 +195,8 @@ def main():
     num_gpus = args.num_gpus
     if num_gpus <= 1:
         _extend_worker(0, 1, [grouped], args.max_generate_num,
-                       args.extended_description_path, args.log_dir, class_map)
+                       args.extended_description_path, args.log_dir, class_map,
+                       args.examples_dir)
         return
 
     logger.info("Multi-GPU mode: %d GPUs, %d classes", num_gpus, num_classes)
@@ -181,7 +207,8 @@ def main():
     mp.spawn(
         _extend_worker,
         args=(num_gpus, chunks, args.max_generate_num,
-              args.extended_description_path, args.log_dir, class_map),
+              args.extended_description_path, args.log_dir, class_map,
+              args.examples_dir),
         nprocs=num_gpus,
         join=True,
     )

@@ -199,7 +199,7 @@ def _worker(rank, world_size, class_chunks, args, examples_dir):
                 f.write(f"\n## Generated Images ({len(records)})\n\n")
                 for k, (desc, score, img_path) in enumerate(records, 1):
                     f.write(f"### Image {k}\n\n")
-                    f.write(f"![Image {k}]({img_path})\n\n")
+                    f.write(f"![Image {k}](file://{img_path})\n\n")
                     f.write(f"**Description:** {desc}\n\n")
                     f.write(f"**CLIP Score:** {score:.4f}\n\n")
             gen_records.pop(label)
@@ -215,7 +215,7 @@ def _worker(rank, world_size, class_chunks, args, examples_dir):
                 f.write(f"\n## Generated Images ({len(records)})\n\n")
                 for k, (desc, score, img_path) in enumerate(records, 1):
                     f.write(f"### Image {k}\n\n")
-                    f.write(f"![Image {k}]({img_path})\n\n")
+                    f.write(f"![Image {k}](file://{img_path})\n\n")
                     f.write(f"**Description:** {desc}\n\n")
                     f.write(f"**CLIP Score:** {score:.4f}\n\n")
 

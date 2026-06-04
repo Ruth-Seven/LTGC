@@ -220,7 +220,7 @@ def _ddp_worker(rank, world_size, args_dict):
                 f.write(f"## Original Descriptions ({len(records)})\n\n")
                 for k, (img_path, desc) in enumerate(records, 1):
                     f.write(f"### Image {k}\n\n")
-                    f.write(f"![Image {k}]({img_path})\n\n")
+                    f.write(f"![Image {k}](file://{img_path})\n\n")
                     f.write(f"**Description:** {desc}\n\n")
         logger.info("DDP rank %d wrote .part md for %d classes", rank, len(per_class))
 
@@ -392,7 +392,7 @@ def _save_single_gpu_examples(per_class, examples_dir, logger):
             f.write(f"## Original Descriptions ({len(records)})\n\n")
             for k, (img_path, desc) in enumerate(records, 1):
                 f.write(f"### Image {k}\n\n")
-                f.write(f"![Image {k}]({img_path})\n\n")
+                f.write(f"![Image {k}](file://{img_path})\n\n")
                 f.write(f"**Description:** {desc}\n\n")
     logger.info("Examples saved to %s (%d classes)", examples_dir, len(per_class))
 

@@ -9,6 +9,7 @@ import shutil
 import argparse
 import logging
 import pandas as pd
+from collections import defaultdict
 import torch.multiprocessing as mp
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -32,6 +33,8 @@ def parse_args():
                         help='Log file directory for worker processes')
     parser.add_argument('--class-mapping', type=str, default=None,
                         help='JSON class name mapping file')
+    parser.add_argument('--examples-dir', type=str, default=None,
+                        help='Directory to save per-class Markdown (append Generated Images section, alias of --md)')
     return parser.parse_args()
 
 
@@ -64,7 +67,7 @@ def save_generation_markdown(records, output_dir):
     print(f"[save_generation_markdown] Examples saved to {md_path}")
 
 
-def _worker(rank, world_size, class_chunks, args):
+def _worker(rank, world_size, class_chunks, args, examples_dir):
     os.environ["CUDA_VISIBLE_DEVICES"] = str(rank)
 
     os.makedirs(args.log_dir, exist_ok=True)
@@ -88,7 +91,10 @@ def _worker(rank, world_size, class_chunks, args):
             return str(_class_map.get(str(label), label))
         return _imagenet_class_name(int(label)).split(", ")[0]
 
-    md_records = []
+    # resolve examples_dir: prefer --examples-dir, fallback to --md for backward compat
+    examples_dir = examples_dir or args.md
+
+    gen_records = defaultdict(list) if examples_dir else None
     class_list = class_chunks[rank]
     total = len(class_list)
 
@@ -112,8 +118,8 @@ def _worker(rank, world_size, class_chunks, args):
                                 label, label_idx + 1, total, attempt + 1, args.max_rounds, clip_score, class_name)
                     if clip_score >= args.thresh:
                         logger.info("accepted")
-                        if args.md is not None:
-                            md_records.append((class_name, text, img_path, clip_score))
+                        if examples_dir:
+                            gen_records[label].append((text, clip_score, img_path))
                         accepted = True
                         break
                     else:
@@ -161,8 +167,8 @@ def _worker(rank, world_size, class_chunks, args):
                                 label, label_idx + 1, total, attempt + 1, args.max_rounds, s, class_name)
                     if s >= args.thresh:
                         logger.info("accepted")
-                        if args.md is not None:
-                            md_records.append((class_name, texts[idx], save_paths[idx], s))
+                        if examples_dir:
+                            gen_records[label].append((texts[idx], s, save_paths[idx]))
                         accepted[idx] = True
                     else:
                         logger.info("Score %.4f < %s", s, args.thresh)
@@ -183,8 +189,36 @@ def _worker(rank, world_size, class_chunks, args):
         if failed:
             logger.info("%d/%d failed", failed, n)
 
-    if md_records and args.md is not None:
-        save_generation_markdown(md_records, os.path.join(args.md, f"gpu_{rank}"))
+        # 按 class 写入 Generated Images 段落
+        if examples_dir and gen_records.get(label):
+            os.makedirs(examples_dir, exist_ok=True)
+            safe_name = class_name.replace(' ', '_').replace('/', '_')
+            md_path = os.path.join(examples_dir, f"{label}_{safe_name}.md")
+            records = gen_records[label]
+            with open(md_path, 'a') as f:
+                f.write(f"\n## Generated Images ({len(records)})\n\n")
+                f.write("| # | Description | CLIP Score | File |\n")
+                f.write("|---|-------------|------------|------|\n")
+                for k, (desc, score, img_path) in enumerate(records, 1):
+                    f.write(f"| {k} | {desc} | {score:.4f} | `{img_path}` |\n")
+                f.write("\n")
+            gen_records.pop(label)
+
+    if examples_dir and gen_records:
+        # write any remaining records (e.g. from onepath mode)
+        for label, records in gen_records.items():
+            class_name = _class_name(label)
+            safe_name = class_name.replace(' ', '_').replace('/', '_')
+            md_path = os.path.join(examples_dir, f"{label}_{safe_name}.md")
+            os.makedirs(examples_dir, exist_ok=True)
+            with open(md_path, 'a') as f:
+                f.write(f"\n## Generated Images ({len(records)})\n\n")
+                f.write("| # | Description | CLIP Score | File |\n")
+                f.write("|---|-------------|------------|------|\n")
+                for k, (desc, score, img_path) in enumerate(records, 1):
+                    f.write(f"| {k} | {desc} | {score:.4f} | `{img_path}` |\n")
+                f.write("\n")
+
     logger.info("Done. %d classes processed.", total)
 
 
@@ -212,7 +246,7 @@ def main():
     grouped = sorted(df.groupby('label')['text'].apply(list).items())
 
     if num_gpus <= 1:
-        _worker(0, 1, [grouped], args)
+        _worker(0, 1, [grouped], args, args.examples_dir)
         return
 
     print(f"[generate] Using {num_gpus} GPUs, {len(grouped)} classes total")
@@ -222,7 +256,7 @@ def main():
 
     mp.spawn(
         _worker,
-        args=(num_gpus, chunks, args),
+        args=(num_gpus, chunks, args, args.examples_dir),
         nprocs=num_gpus,
         join=True,
     )

@@ -37,8 +37,45 @@ def collate_no_stack(batch):
 
 text_prompt = (
     "Please use the Template to briefly describe the image of the class {name} in only one sentence. Template:\n"
-    "'A photo of the class {name}, with [distinctive features], [specific scenes].'\n"
+    "'A photo of the class {name}, with [distinctive features], in [specific scenes].'\n"
 )
+
+MAX_DESCRIBE_RETRIES = 3
+
+
+def _describe_with_retry(group_imgs, name, logger):
+    results = [""] * len(group_imgs)
+
+    for attempt in range(MAX_DESCRIBE_RETRIES):
+        pending = [(i, group_imgs[i]) for i, r in enumerate(results) if not r]
+        if not pending:
+            break
+
+        p_indices, p_imgs = zip(*pending) if pending else ([], [])
+        p_indices = list(p_indices)
+        p_imgs = list(p_imgs)
+
+        prompts = [text_prompt.format(name=name)] * len(p_imgs)
+        batch_results = describe_image_batch(p_imgs, prompts)
+
+        for idx, desc in zip(p_indices, batch_results):
+            if desc and validate_description(desc, name):
+                results[idx] = desc
+
+        still_failed = sum(1 for r in results if not r)
+        if still_failed == 0:
+            break
+        if attempt < MAX_DESCRIBE_RETRIES - 1:
+            logger.info("Class %s: attempt %d/%d, %d/%d images passed",
+                        name, attempt + 1, MAX_DESCRIBE_RETRIES,
+                        len(group_imgs) - still_failed, len(group_imgs))
+
+    final_failed = sum(1 for r in results if not r)
+    if final_failed > 0:
+        logger.warning("Class %s: %d/%d images failed all %d attempts",
+                       name, final_failed, len(group_imgs), MAX_DESCRIBE_RETRIES)
+
+    return results
 
 
 def parse_args():
@@ -169,14 +206,12 @@ def _ddp_worker(rank, world_size, args_dict):
                 groups[(cls_id, name)].append(i)
 
         for (cls_id, name), indices in groups.items():
-            G = len(indices)
             group_imgs = [data_list[i] for i in indices]
-            prompts = [text_prompt.format(name=name)] * G
-            descriptions = describe_image_batch(group_imgs, prompts)
+            descriptions = _describe_with_retry(group_imgs, name, logger)
 
-            tail_count += G
+            tail_count += len(indices)
             for i, desc in zip(indices, descriptions):
-                if desc and validate_description(desc, name):
+                if desc:
                     data_to_write.append((cls_id, desc))
 
                     if cls_id not in example_classes and len(example_classes) < max_examples:
@@ -201,10 +236,13 @@ def _ddp_worker(rank, world_size, args_dict):
         describe_example_markdown(examples, part_examples_dir, logger)
 
     logger.info("DDP rank %d done. Processed: %d, Tail: %d", rank, processed, tail_count)
-    # 先释放 DataLoader（shut down pin_memory workers）再同步 CUDA stream，
-    # 最后销毁 NCCL 进程组，三个操作顺序不可颠倒
+    # 显式关闭 DataLoader worker（释放 pin_memory），同步 + 清空 CUDA cache，
+    # 确保 NCCL destroy 时无残留 CUDA 资源竞争
+    loader._shutdown_workers()
     del loader
     torch.cuda.synchronize()
+    torch.cuda.empty_cache()
+    time.sleep(0.5)
     dist.destroy_process_group()
 
 
@@ -274,14 +312,12 @@ def _main_single_gpu(args, logger):
                 groups[(cls_id, name)].append(i)
 
         for (cls_id, name), indices in groups.items():
-            G = len(indices)
             group_imgs = [data_list[i] for i in indices]
-            prompts = [text_prompt.format(name=name)] * G
-            descriptions = describe_image_batch(group_imgs, prompts)
+            descriptions = _describe_with_retry(group_imgs, name, logger)
 
-            tail_count += G
+            tail_count += len(indices)
             for i, desc in zip(indices, descriptions):
-                if desc and validate_description(desc, name):
+                if desc:
                     data_to_write.append((cls_id, desc))
 
                     if cls_id not in example_classes and len(example_classes) < args.examples_len:

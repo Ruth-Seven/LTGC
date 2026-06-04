@@ -239,15 +239,6 @@ def _detect_gpus():
 def main():
     args = parse_args()
 
-    if args.examples_dir:
-        os.makedirs(args.examples_dir, exist_ok=True)
-        img_link = os.path.join(args.examples_dir, "images")
-        if os.path.islink(img_link):
-            os.unlink(img_link)
-        elif os.path.exists(img_link):
-            os.remove(img_link)
-        os.symlink(args.data_dir, img_link)
-
     if args.num_gpus == 0:
         num_gpus = _detect_gpus()
     else:

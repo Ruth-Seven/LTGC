@@ -405,17 +405,6 @@ def main():
     os.makedirs(args.log_dir, exist_ok=True)
     logger = setup_logger("describe", os.path.join(args.log_dir, "pipeline_describe.log"))
 
-    if args.examples_dir:
-        os.makedirs(args.examples_dir, exist_ok=True)
-        img_link = os.path.join(args.examples_dir, "images")
-        img_target = os.path.join(args.data_dir, "train")
-        if os.path.islink(img_link):
-            os.unlink(img_link)
-        elif os.path.exists(img_link):
-            os.remove(img_link)
-        os.symlink(img_target, img_link)
-        logger.info("Created symlink: %s -> %s", img_link, img_target)
-
     cleanup_stale_parts(args.existing_description_path, logger)
 
     description_file = args.existing_description_path

@@ -219,8 +219,9 @@ def _ddp_worker(rank, world_size, args_dict):
             with open(part_md, 'w') as f:
                 f.write(f"## Original Descriptions ({len(records)})\n\n")
                 for k, (img_path, desc) in enumerate(records, 1):
+                    img_rel = f"images/{cls_id}/{os.path.basename(img_path)}"
                     f.write(f"### Image {k}\n\n")
-                    f.write(f"![Image {k}](file://{img_path})\n\n")
+                    f.write(f"![Image {k}]({img_rel})\n\n")
                     f.write(f"**Description:** {desc}\n\n")
         logger.info("DDP rank %d wrote .part md for %d classes", rank, len(per_class))
 
@@ -391,8 +392,9 @@ def _save_single_gpu_examples(per_class, examples_dir, logger):
             f.write(f"# Class {cls_id}: {name}\n\n")
             f.write(f"## Original Descriptions ({len(records)})\n\n")
             for k, (img_path, desc) in enumerate(records, 1):
+                img_rel = f"images/{cls_id}/{os.path.basename(img_path)}"
                 f.write(f"### Image {k}\n\n")
-                f.write(f"![Image {k}](file://{img_path})\n\n")
+                f.write(f"![Image {k}]({img_rel})\n\n")
                 f.write(f"**Description:** {desc}\n\n")
     logger.info("Examples saved to %s (%d classes)", examples_dir, len(per_class))
 
@@ -402,6 +404,17 @@ def main():
     os.makedirs(os.path.dirname(args.existing_description_path), exist_ok=True)
     os.makedirs(args.log_dir, exist_ok=True)
     logger = setup_logger("describe", os.path.join(args.log_dir, "pipeline_describe.log"))
+
+    if args.examples_dir:
+        os.makedirs(args.examples_dir, exist_ok=True)
+        img_link = os.path.join(args.examples_dir, "images")
+        img_target = os.path.join(args.data_dir, "train")
+        if os.path.islink(img_link):
+            os.unlink(img_link)
+        elif os.path.exists(img_link):
+            os.remove(img_link)
+        os.symlink(img_target, img_link)
+        logger.info("Created symlink: %s -> %s", img_link, img_target)
 
     cleanup_stale_parts(args.existing_description_path, logger)
 

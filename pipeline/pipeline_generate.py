@@ -198,8 +198,9 @@ def _worker(rank, world_size, class_chunks, args, examples_dir):
             with open(md_path, 'a') as f:
                 f.write(f"\n## Generated Images ({len(records)})\n\n")
                 for k, (desc, score, img_path) in enumerate(records, 1):
+                    img_rel = f"images/{os.path.relpath(img_path, args.data_dir)}"
                     f.write(f"### Image {k}\n\n")
-                    f.write(f"![Image {k}](file://{img_path})\n\n")
+                    f.write(f"![Image {k}]({img_rel})\n\n")
                     f.write(f"**Description:** {desc}\n\n")
                     f.write(f"**CLIP Score:** {score:.4f}\n\n")
             gen_records.pop(label)
@@ -214,8 +215,9 @@ def _worker(rank, world_size, class_chunks, args, examples_dir):
             with open(md_path, 'a') as f:
                 f.write(f"\n## Generated Images ({len(records)})\n\n")
                 for k, (desc, score, img_path) in enumerate(records, 1):
+                    img_rel = f"images/{os.path.relpath(img_path, args.data_dir)}"
                     f.write(f"### Image {k}\n\n")
-                    f.write(f"![Image {k}](file://{img_path})\n\n")
+                    f.write(f"![Image {k}]({img_rel})\n\n")
                     f.write(f"**Description:** {desc}\n\n")
                     f.write(f"**CLIP Score:** {score:.4f}\n\n")
 
@@ -236,6 +238,15 @@ def _detect_gpus():
 
 def main():
     args = parse_args()
+
+    if args.examples_dir:
+        os.makedirs(args.examples_dir, exist_ok=True)
+        img_link = os.path.join(args.examples_dir, "images")
+        if os.path.islink(img_link):
+            os.unlink(img_link)
+        elif os.path.exists(img_link):
+            os.remove(img_link)
+        os.symlink(args.data_dir, img_link)
 
     if args.num_gpus == 0:
         num_gpus = _detect_gpus()

@@ -132,7 +132,7 @@ def _ddp_worker(rank, world_size, args_dict):
     os.environ['MASTER_ADDR'] = 'localhost'
     os.environ['MASTER_PORT'] = str(args_dict['master_port'])
 
-    dist.init_process_group("nccl", rank=rank, world_size=world_size)
+    dist.init_process_group("gloo", rank=rank, world_size=world_size)
     torch.cuda.set_device(0)
 
     set_backend(args_dict['vlm_backend'])
@@ -226,14 +226,8 @@ def _ddp_worker(rank, world_size, args_dict):
 
     logger.info("DDP rank %d done. Processed: %d, Tail: %d", rank, processed, tail_count)
 
-    try:
-        loader._shutdown_workers()
-    except AttributeError:
-        pass
     del loader
-    torch.cuda.synchronize()
     torch.cuda.empty_cache()
-    time.sleep(0.5)
     dist.destroy_process_group()
 
 

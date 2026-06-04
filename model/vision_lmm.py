@@ -1,45 +1,102 @@
 """
-视觉语言模型模块 (LLaVA)
-负责图像编码和描述生成
+视觉语言模型模块
+支持 LLaVA / Qwen2-VL 双后端，通过 set_backend() 切换
 """
 import torch
 import time
-import re
-from transformers import LlavaForConditionalGeneration, AutoProcessor
+from transformers import AutoProcessor
 from PIL import Image
 
-from config import LOCAL_VLM_ID, VLM_MAX_TOKENS
+from config import LOCAL_VLM_ID, VLM_MAX_TOKENS, LLAVA_MODEL_ID, QWEN2VL_MODEL_ID
+
+try:
+    from transformers import LlavaForConditionalGeneration
+    _HAS_LLAVA = True
+except ImportError:
+    _HAS_LLAVA = False
+
+try:
+    from transformers import Qwen2VLForConditionalGeneration
+    _HAS_QWEN2VL = True
+except ImportError:
+    _HAS_QWEN2VL = False
 
 
 _model = None
 _processor = None
+_model_path = LOCAL_VLM_ID
+_backend = None
+
+
+def set_backend(backend):
+    """设置 VLM 后端，同时自动选择对应的默认模型路径
+
+    Args:
+        backend: "llava" 或 "qwen2vl"
+    """
+    global _backend, _model_path
+    if backend not in ("llava", "qwen2vl"):
+        raise ValueError(f"Unknown VLM backend: {backend}, expected 'llava' or 'qwen2vl'")
+    _backend = backend
+    _model_path = LLAVA_MODEL_ID if backend == "llava" else QWEN2VL_MODEL_ID
+
+
+def set_model_path(path):
+    """设置 VLM 模型路径（必须在首次加载模型前调用）
+
+    Args:
+        path: HuggingFace 模型路径或本地目录
+    """
+    global _model_path, _model, _processor
+    if _model is not None:
+        print("[vision_llm] Unloading existing model (path changed)")
+        del _model
+        del _processor
+        _model = None
+        _processor = None
+        torch.cuda.empty_cache()
+    _model_path = path
 
 
 def _load_model():
-    global _model, _processor
+    global _model, _processor, _model_path, _backend
     if _model is not None:
         return _model, _processor
 
-    print(f"[vision_llm] Loading LLaVA model: {LOCAL_VLM_ID} ...")
+    if _backend is None:
+        raise RuntimeError("[vision_llm] set_backend() must be called before first inference")
+
+    if _backend == "qwen2vl":
+        if not _HAS_QWEN2VL:
+            raise ImportError("Qwen2VLForConditionalGeneration not available")
+        ModelClass = Qwen2VLForConditionalGeneration
+    elif _backend == "llava":
+        if not _HAS_LLAVA:
+            raise ImportError("LlavaForConditionalGeneration not available")
+        ModelClass = LlavaForConditionalGeneration
+    else:
+        raise ValueError(f"Unknown backend: {_backend}")
+
+    print(f"[vision_llm] Loading VLM model (backend={_backend}): {_model_path} ...")
     dtype = torch.float16 if torch.cuda.is_available() else torch.float32
 
     try:
-        _model = LlavaForConditionalGeneration.from_pretrained(
-            LOCAL_VLM_ID,
+        _model = ModelClass.from_pretrained(
+            _model_path,
             torch_dtype=dtype,
             device_map="auto",
         )
     except torch.cuda.OutOfMemoryError:
         print("[vision_llm] GPU OOM, falling back to CPU (float32)...")
         torch.cuda.empty_cache()
-        _model = LlavaForConditionalGeneration.from_pretrained(
-            LOCAL_VLM_ID,
+        _model = ModelClass.from_pretrained(
+            _model_path,
             torch_dtype=torch.float32,
             device_map="cpu",
         )
 
-    _processor = AutoProcessor.from_pretrained(LOCAL_VLM_ID)
-    print("[vision_llm] LLaVA model loaded.")
+    _processor = AutoProcessor.from_pretrained(_model_path)
+    print("[vision_llm] VLM model loaded.")
     return _model, _processor
 
 
@@ -52,7 +109,7 @@ def _tensor_to_pil(tensor):
 
 
 def describe_image(image_tensor, text_prompt, max_retries=2):
-    """使用 LLaVA 模型进行图像理解，返回描述文本
+    """使用 VLM 模型进行图像理解，返回描述文本
 
     Args:
         image_tensor: PyTorch 张量 (CxHxW), 值范围 [0, 1]
@@ -64,6 +121,18 @@ def describe_image(image_tensor, text_prompt, max_retries=2):
     """
     results = describe_image_batch([image_tensor], [text_prompt], max_retries)
     return results[0] if results else ""
+
+
+def _build_qwen2vl_messages(image, prompt):
+    return [
+        {
+            "role": "user",
+            "content": [
+                {"type": "image", "image": image},
+                {"type": "text", "text": prompt},
+            ],
+        }
+    ]
 
 
 def describe_image_batch(image_tensors, text_prompts, max_retries=2):
@@ -79,25 +148,38 @@ def describe_image_batch(image_tensors, text_prompts, max_retries=2):
     """
     B = len(image_tensors)
     if B == 0:
-        return [""] * B
+        return []
 
     for attempt in range(max_retries):
         try:
             model, processor = _load_model()
-            images = [_tensor_to_pil(t) for t in image_tensors]
-            prompts = [f"USER: <image>\n{p}\nASSISTANT:" for p in text_prompts]
+            pil_images = [_tensor_to_pil(t) for t in image_tensors]
 
-            inputs = processor(images=images, text=prompts, return_tensors="pt", padding=True)
-            input_ids = inputs['input_ids'].to(model.device)
-            pixel_values = inputs['pixel_values'].to(model.device)
-            attention_mask = inputs['attention_mask'].to(model.device)
-            input_lengths = attention_mask.sum(dim=1)
+            if _backend == "qwen2vl":
+                messages_list = [_build_qwen2vl_messages(img, prompt) for img, prompt in zip(pil_images, text_prompts)]
+                texts = [
+                    processor.apply_chat_template(msg, tokenize=False, add_generation_prompt=True)
+                    for msg in messages_list
+                ]
+                inputs = processor(
+                    text=texts,
+                    images=pil_images,
+                    return_tensors="pt",
+                    padding=True,
+                )
+            elif _backend == "llava":
+                prompts = [f"USER: <image>\n{p}\nASSISTANT:" for p in text_prompts]
+                inputs = processor(images=pil_images, text=prompts, return_tensors="pt", padding=True)
+            else:
+                raise ValueError(f"Unknown backend: {_backend}")
+
+            inputs = {k: v.to(model.device) for k, v in inputs.items()}
+
+            input_lengths = inputs["attention_mask"].sum(dim=1)
 
             with torch.no_grad():
                 output = model.generate(
-                    input_ids=input_ids,
-                    pixel_values=pixel_values,
-                    attention_mask=attention_mask,
+                    **inputs,
                     max_new_tokens=VLM_MAX_TOKENS,
                     do_sample=False,
                 )
@@ -125,4 +207,3 @@ def describe_image_batch(image_tensors, text_prompts, max_retries=2):
 
     print("[vision_llm] All retries exhausted, returning empty batch")
     return [""] * B
-

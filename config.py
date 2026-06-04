@@ -51,10 +51,11 @@ def get_device(model_key=None):
     return _gpu_alloc.allocate()
 
 # ============================================================
-# 本地 VLM (LLaVA) 配置
+# 本地 VLM 配置（LLaVA / Qwen2-VL 双后端）
 # ============================================================
-# LOCAL_VLM_ID = "/data/model/llava-hf_llava-1.5-7b-hf"
-LOCAL_VLM_ID = "/data/model/llava-hf_llava-1.5-7b-hf"
+LLAVA_MODEL_ID = "/data/model/llava-hf_llava-1.5-7b-hf"
+QWEN2VL_MODEL_ID = "/data/model/Qwen2-VL-7B-Instruct"
+LOCAL_VLM_ID = QWEN2VL_MODEL_ID
 VLM_MAX_TOKENS = 200
 
 # ============================================================

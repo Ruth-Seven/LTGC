@@ -197,11 +197,11 @@ def _worker(rank, world_size, class_chunks, args, examples_dir):
             records = gen_records[label]
             with open(md_path, 'a') as f:
                 f.write(f"\n## Generated Images ({len(records)})\n\n")
-                f.write("| # | Description | CLIP Score | File |\n")
-                f.write("|---|-------------|------------|------|\n")
                 for k, (desc, score, img_path) in enumerate(records, 1):
-                    f.write(f"| {k} | {desc} | {score:.4f} | `{img_path}` |\n")
-                f.write("\n")
+                    f.write(f"### Image {k}\n\n")
+                    f.write(f"![Image {k}]({img_path})\n\n")
+                    f.write(f"**Description:** {desc}\n\n")
+                    f.write(f"**CLIP Score:** {score:.4f}\n\n")
             gen_records.pop(label)
 
     if examples_dir and gen_records:
@@ -213,11 +213,11 @@ def _worker(rank, world_size, class_chunks, args, examples_dir):
             os.makedirs(examples_dir, exist_ok=True)
             with open(md_path, 'a') as f:
                 f.write(f"\n## Generated Images ({len(records)})\n\n")
-                f.write("| # | Description | CLIP Score | File |\n")
-                f.write("|---|-------------|------------|------|\n")
                 for k, (desc, score, img_path) in enumerate(records, 1):
-                    f.write(f"| {k} | {desc} | {score:.4f} | `{img_path}` |\n")
-                f.write("\n")
+                    f.write(f"### Image {k}\n\n")
+                    f.write(f"![Image {k}]({img_path})\n\n")
+                    f.write(f"**Description:** {desc}\n\n")
+                    f.write(f"**CLIP Score:** {score:.4f}\n\n")
 
     logger.info("Done. %d classes processed.", total)
 

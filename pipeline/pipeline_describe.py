@@ -213,11 +213,10 @@ def _ddp_worker(rank, world_size, args_dict):
             part_md = os.path.join(tmp_dir, f"{cls_id}.part{rank}.md")
             with open(part_md, 'w') as f:
                 f.write(f"## Original Descriptions ({len(records)})\n\n")
-                f.write("| # | File | Description |\n")
-                f.write("|---|------|-------------|\n")
                 for k, (img_path, desc) in enumerate(records, 1):
-                    f.write(f"| {k} | `{img_path}` | {desc} |\n")
-                f.write("\n")
+                    f.write(f"### Image {k}\n\n")
+                    f.write(f"![Image {k}]({img_path})\n\n")
+                    f.write(f"**Description:** {desc}\n\n")
         logger.info("DDP rank %d wrote .part md for %d classes", rank, len(per_class))
 
     logger.info("DDP rank %d done. Processed: %d, Tail: %d", rank, processed, tail_count)
@@ -388,11 +387,10 @@ def _save_single_gpu_examples(per_class, examples_dir, logger):
         with open(md_path, 'w') as f:
             f.write(f"# Class {cls_id}: {name}\n\n")
             f.write(f"## Original Descriptions ({len(records)})\n\n")
-            f.write("| # | File | Description |\n")
-            f.write("|---|------|-------------|\n")
             for k, (img_path, desc) in enumerate(records, 1):
-                f.write(f"| {k} | `{img_path}` | {desc} |\n")
-            f.write("\n")
+                f.write(f"### Image {k}\n\n")
+                f.write(f"![Image {k}]({img_path})\n\n")
+                f.write(f"**Description:** {desc}\n\n")
     logger.info("Examples saved to %s (%d classes)", examples_dir, len(per_class))
 
 

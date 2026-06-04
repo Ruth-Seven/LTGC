@@ -22,7 +22,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from config import IMAGENET_DIR, DESCRIPTIONS_DIR, CLASS_COUNT_FILE
 from data.data_loader import ImageNetLTDataset, SUPPORTED_EXTENSIONS
 from data_txt.imagenet_label_mapping import get_readable_name
-from model.vision_lmm import describe_image_batch
+from model.vision_lmm import describe_image_batch, set_backend
 from utils import validate_description, cleanup_stale_parts
 from collections import defaultdict, Counter
 
@@ -99,7 +99,10 @@ def parse_args():
     parser.add_argument('--num_workers', type=int, default=16,
                         help='DataLoader workers per GPU (default: 16)')
     parser.add_argument('--batch_size', type=int, default=6,
-                        help='Batch size for LLaVA inference (default: 6)')
+                        help='Batch size for VLM inference (default: 6)')
+    parser.add_argument('--vlm-backend', type=str, default='qwen2vl',
+                        choices=['llava', 'qwen2vl'],
+                        help='VLM backend: llava | qwen2vl (default: qwen2vl)')
     return parser.parse_args()
 
 
@@ -131,6 +134,8 @@ def _ddp_worker(rank, world_size, args_dict):
 
     dist.init_process_group("nccl", rank=rank, world_size=world_size)
     torch.cuda.set_device(0)
+
+    set_backend(args_dict['vlm_backend'])
 
     log_dir = args_dict['log_dir']
     logger = setup_logger(f"describe_gpu{rank}", os.path.join(log_dir, f"pipeline_describe_gpu{rank}.log"))
@@ -255,6 +260,8 @@ def _merge_parts(output_path, num_gpus, logger):
 
 
 def _main_single_gpu(args, logger):
+    set_backend(args.vlm_backend)
+
     description_file = args.existing_description_path
     tmp_file = description_file + ".tmp"
     if os.path.exists(tmp_file):
@@ -430,6 +437,7 @@ def main():
             'num_workers': max(1, args.num_workers // args.num_gpus),
             'batch_size': args.batch_size,
             'master_port': master_port,
+            'vlm_backend': args.vlm_backend,
         }
 
         mp.spawn(

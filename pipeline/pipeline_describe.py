@@ -19,7 +19,7 @@ from torchvision import transforms
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from config import IMAGENET_DIR, DESCRIPTIONS_DIR, DESCRIPTION_EXAMPLE_DIR, CLASS_COUNT_FILE
+from config import IMAGENET_DIR, DESCRIPTIONS_DIR, CLASS_COUNT_FILE
 from data.data_loader import ImageNetLTDataset, SUPPORTED_EXTENSIONS
 from data_txt.imagenet_label_mapping import get_readable_name
 from model.vision_lmm import describe_image_batch
@@ -89,11 +89,8 @@ def parse_args():
                         default=os.path.join(DESCRIPTIONS_DIR, 'existing_description_list.csv'),
                         help='Output CSV path')
     parser.add_argument('--examples-dir',
-                        default=DESCRIPTION_EXAMPLE_DIR,
-                        help='Directory to save example markdown with images')
-    parser.add_argument('--examples-len',
-                        default=30, type=int,
-                        help='Number of example images to save')
+                        default=None,
+                        help='Directory to save per-class Markdown examples (skip if not set)')
     parser.add_argument('-t', '--test', action='store_true', help='Run in test mode with limited examples')
     parser.add_argument('--log_dir', type=str, default="/tmp",
                         help='Log file directory')
@@ -124,29 +121,6 @@ def setup_logger(name, log_path):
     ))
     logger.addHandler(fh)
     return logger
-
-
-def describe_example_markdown(examples, output_dir, logger=None):
-    os.makedirs(output_dir, exist_ok=True)
-    md_path = os.path.join(output_dir, "tail_class_description_examples.md")
-    to_pil = transforms.ToPILImage()
-
-    with open(md_path, "w", encoding="utf-8") as f:
-        f.write("# Tail Class Description Examples\n\n")
-        f.write(f"Total examples: {len(examples)}\n\n")
-
-        for i, (cls_id, img_tensor, description, class_name) in enumerate(examples):
-            img_filename = f"example_{cls_id}_{i}.jpg"
-            img_path = os.path.join(output_dir, img_filename)
-            img_tensor_cpu = img_tensor.squeeze(0).cpu().clamp(0, 1)
-            to_pil(img_tensor_cpu).save(img_path)
-
-            f.write(f"## Example {i+1}: Class {cls_id} - {class_name}\n\n")
-            f.write(f"![Image]({img_filename})\n\n")
-            f.write(f"**Description:** {description}\n\n")
-            f.write("---\n\n")
-
-    (logger or logging.getLogger()).info("Examples saved to %s", md_path)
 
 
 def _ddp_worker(rank, world_size, args_dict):
@@ -186,12 +160,11 @@ def _ddp_worker(rank, world_size, args_dict):
     # 创建/截断空文件，避免上次残留数据（即使主进程已清过，防御极端情况）
     open(part_path, 'w').close()
     data_to_write = []
-    examples = []
-    example_classes = set()
+    examples_dir = args_dict.get('examples_dir')
+    per_class = defaultdict(list) if examples_dir else None
     processed = 0
     tail_count = 0
 
-    max_examples = args_dict.get('examples_len', 30) // world_size + 1
     threshold = args_dict['tail_num_threshold']
     test_mode = args_dict.get('test', False)
 
@@ -214,9 +187,10 @@ def _ddp_worker(rank, world_size, args_dict):
                 if desc:
                     data_to_write.append((cls_id, desc))
 
-                    if cls_id not in example_classes and len(example_classes) < max_examples:
-                        example_classes.add(cls_id)
-                        examples.append((cls_id, data_list[i].clone(), desc, name))
+                    if per_class is not None:
+                        orig_idx = int(index[i])
+                        img_path = dataset.img_paths[orig_idx]
+                        per_class[cls_id].append((img_path, desc))
 
                 if len(data_to_write) >= 10:
                     with open(part_path, 'a', newline='') as f:
@@ -224,16 +198,27 @@ def _ddp_worker(rank, world_size, args_dict):
                     data_to_write = []
 
         processed += B
-        if test_mode and len(example_classes) >= 10:
+        if test_mode and processed >= 1000:
             break
 
     if data_to_write:
         with open(part_path, 'a', newline='') as f:
             csv.writer(f).writerows(data_to_write)
 
-    if examples:
-        part_examples_dir = os.path.join(args_dict.get('examples_dir', DESCRIPTION_EXAMPLE_DIR), f"part{rank}")
-        describe_example_markdown(examples, part_examples_dir, logger)
+    if per_class:
+        tmp_dir = os.path.join(examples_dir, '.tmp')
+        os.makedirs(tmp_dir, exist_ok=True)
+        for cls_id, records in per_class.items():
+            name = get_readable_name(cls_id).split(", ")[0]
+            part_md = os.path.join(tmp_dir, f"{cls_id}.part{rank}.md")
+            with open(part_md, 'w') as f:
+                f.write(f"## Original Descriptions ({len(records)})\n\n")
+                f.write("| # | File | Description |\n")
+                f.write("|---|------|-------------|\n")
+                for k, (img_path, desc) in enumerate(records, 1):
+                    f.write(f"| {k} | `{img_path}` | {desc} |\n")
+                f.write("\n")
+        logger.info("DDP rank %d wrote .part md for %d classes", rank, len(per_class))
 
     logger.info("DDP rank %d done. Processed: %d, Tail: %d", rank, processed, tail_count)
     # 显式关闭 DataLoader worker（释放 pin_memory），同步 + 清空 CUDA cache，
@@ -296,8 +281,8 @@ def _main_single_gpu(args, logger):
     data_to_write = []
     processed = 0
     tail_count = 0
-    examples = []
-    example_classes = set()
+    examples_dir = args.examples_dir
+    per_class = defaultdict(list) if examples_dir else None
 
     logger.info("Starting image description generation for tail classes...")
 
@@ -320,9 +305,10 @@ def _main_single_gpu(args, logger):
                 if desc:
                     data_to_write.append((cls_id, desc))
 
-                    if cls_id not in example_classes and len(example_classes) < args.examples_len:
-                        example_classes.add(cls_id)
-                        examples.append((cls_id, data_list[i].clone(), desc, name))
+                    if per_class is not None:
+                        orig_idx = int(index[i])
+                        img_path = dataset.img_paths[orig_idx]
+                        per_class[cls_id].append((img_path, desc))
 
                 if len(data_to_write) >= 10:
                     with open(tmp_file, 'a', newline='') as f:
@@ -330,15 +316,15 @@ def _main_single_gpu(args, logger):
                     data_to_write = []
 
         processed += B
-        if args.test and len(example_classes) >= args.examples_len:
+        if args.test and processed >= 1000:
             break
 
     if data_to_write:
         with open(tmp_file, 'a', newline='') as f:
             csv.writer(f).writerows(data_to_write)
 
-    if examples:
-        describe_example_markdown(examples, args.examples_dir, logger)
+    if per_class:
+        _save_single_gpu_examples(per_class, examples_dir, logger)
 
     os.rename(tmp_file, description_file)
     logger.info("Single-GPU done. Processed: %d, Tail: %d, Output: %s", processed, tail_count, description_file)
@@ -363,6 +349,49 @@ def _count_classes_from_fs(data_dir, class_number_file, logger):
         json.dump(dict(sorted(class_counts.items())), f, indent=4)
     logger.info("Class counts saved from FS scan: %d classes, %d total samples",
                 len(class_counts), sum(class_counts.values()))
+
+
+def _concat_class_examples(examples_dir, logger):
+    """将 .tmp/ 下的 per-worker part 文件 concat 成 examples_dir/{cls_id}.md"""
+    tmp_dir = os.path.join(examples_dir, '.tmp')
+    if not os.path.isdir(tmp_dir):
+        return
+    from collections import defaultdict as _dd
+    class_parts = _dd(list)
+    for fname in sorted(os.listdir(tmp_dir)):
+        cls_id = fname.split('.')[0]
+        class_parts[cls_id].append(os.path.join(tmp_dir, fname))
+    for cls_id, parts in class_parts.items():
+        md_path = os.path.join(examples_dir, f"{cls_id}.md")
+        name = get_readable_name(int(cls_id)).split(", ")[0]
+        os.makedirs(examples_dir, exist_ok=True)
+        with open(md_path, 'w') as out:
+            out.write(f"# Class {cls_id}: {name}\n\n")
+            for part_path in sorted(parts):
+                with open(part_path) as f:
+                    out.write(f.read())
+    import shutil
+    shutil.rmtree(tmp_dir)
+    logger.info("Examples saved to %s (%d classes)", examples_dir, len(class_parts))
+
+
+def _save_single_gpu_examples(per_class, examples_dir, logger):
+    """单 GPU 模式：直接写 examples_dir/{cls_id}.md"""
+    if not per_class or not examples_dir:
+        return
+    os.makedirs(examples_dir, exist_ok=True)
+    for cls_id, records in per_class.items():
+        name = get_readable_name(cls_id).split(", ")[0]
+        md_path = os.path.join(examples_dir, f"{cls_id}.md")
+        with open(md_path, 'w') as f:
+            f.write(f"# Class {cls_id}: {name}\n\n")
+            f.write(f"## Original Descriptions ({len(records)})\n\n")
+            f.write("| # | File | Description |\n")
+            f.write("|---|------|-------------|\n")
+            for k, (img_path, desc) in enumerate(records, 1):
+                f.write(f"| {k} | `{img_path}` | {desc} |\n")
+            f.write("\n")
+    logger.info("Examples saved to %s (%d classes)", examples_dir, len(per_class))
 
 
 def main():
@@ -396,7 +425,6 @@ def main():
             'class_number_file': args.class_number_file,
             'existing_description_path': args.existing_description_path,
             'examples_dir': args.examples_dir,
-            'examples_len': args.examples_len,
             'test': args.test,
             'log_dir': args.log_dir,
             'num_workers': max(1, args.num_workers // args.num_gpus),
@@ -412,6 +440,8 @@ def main():
         )
 
         _merge_parts(args.existing_description_path, args.num_gpus, logger)
+        if args.examples_dir:
+            _concat_class_examples(args.examples_dir, logger)
     else:
         _main_single_gpu(args, logger)
 

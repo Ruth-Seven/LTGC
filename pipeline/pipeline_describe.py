@@ -23,7 +23,7 @@ from config import IMAGENET_DIR, DESCRIPTIONS_DIR, CLASS_COUNT_FILE
 from data.data_loader import ImageNetLTDataset, SUPPORTED_EXTENSIONS
 from data_txt.imagenet_label_mapping import get_readable_name
 from model.vision_lmm import describe_image_batch, set_backend
-from utils import validate_description, cleanup_stale_parts
+from utils import validate_description, cleanup_stale_parts, load_prompts
 from collections import defaultdict, Counter
 
 
@@ -35,15 +35,10 @@ def collate_no_stack(batch):
     return images, targets, indices
 
 
-text_prompt = (
-    "Please use the Template to briefly describe the image of the class {name} in only one sentence. Template:\n"
-    "'A photo of the class {name}, with [distinctive features], in [specific scenes].'\n"
-)
-
 MAX_DESCRIBE_RETRIES = 3
 
 
-def _describe_with_retry(group_imgs, name, logger):
+def _describe_with_retry(group_imgs, name, logger, vlm_prompt):
     results = [""] * len(group_imgs)
 
     for attempt in range(MAX_DESCRIBE_RETRIES):
@@ -55,7 +50,7 @@ def _describe_with_retry(group_imgs, name, logger):
         p_indices = list(p_indices)
         p_imgs = list(p_imgs)
 
-        prompts = [text_prompt.format(name=name)] * len(p_imgs)
+        prompts = [vlm_prompt.format(name=name)] * len(p_imgs)
         batch_results = describe_image_batch(p_imgs, prompts)
 
         for idx, desc in zip(p_indices, batch_results):
@@ -103,6 +98,8 @@ def parse_args():
     parser.add_argument('--vlm-backend', type=str, default='qwen2vl',
                         choices=['llava', 'qwen2vl'],
                         help='VLM backend: llava | qwen2vl (default: qwen2vl)')
+    parser.add_argument('--prompt-file', type=str, default=None,
+                        help='Prompt JSON 配置文件（默认使用内置 prompt）')
     return parser.parse_args()
 
 
@@ -185,7 +182,8 @@ def _ddp_worker(rank, world_size, args_dict):
 
         for (cls_id, name), indices in groups.items():
             group_imgs = [data_list[i] for i in indices]
-            descriptions = _describe_with_retry(group_imgs, name, logger)
+            descriptions = _describe_with_retry(group_imgs, name, logger,
+                                                args_dict.get('vlm_prompt'))
 
             tail_count += len(indices)
             for i, desc in zip(indices, descriptions):
@@ -301,7 +299,8 @@ def _main_single_gpu(args, logger):
 
         for (cls_id, name), indices in groups.items():
             group_imgs = [data_list[i] for i in indices]
-            descriptions = _describe_with_retry(group_imgs, name, logger)
+            descriptions = _describe_with_retry(group_imgs, name, logger,
+                                                args.vlm_prompt)
 
             tail_count += len(indices)
             for i, desc in zip(indices, descriptions):
@@ -401,6 +400,9 @@ def _save_single_gpu_examples(per_class, examples_dir, logger):
 
 def main():
     args = parse_args()
+    prompts = load_prompts(args.prompt_file)
+    args.vlm_prompt = prompts.get("describe", {}).get("vlm_prompt")
+
     os.makedirs(os.path.dirname(args.existing_description_path), exist_ok=True)
     os.makedirs(args.log_dir, exist_ok=True)
     logger = setup_logger("describe", os.path.join(args.log_dir, "pipeline_describe.log"))
@@ -436,6 +438,7 @@ def main():
             'batch_size': args.batch_size,
             'master_port': master_port,
             'vlm_backend': args.vlm_backend,
+            'vlm_prompt': args.vlm_prompt,
         }
 
         mp.spawn(

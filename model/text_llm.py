@@ -18,6 +18,13 @@ _tokenizer = None
 SYSTEM_PROMPT = "You are a helpful assistant that generates diverse and detailed image descriptions for image classification datasets."
 
 
+def set_system_prompt(prompt):
+    """覆盖默认 SYSTEM_PROMPT（用于 prompt 文件自定义）"""
+    global SYSTEM_PROMPT
+    if prompt:
+        SYSTEM_PROMPT = prompt
+
+
 # ── Local backend ──────────────────────────────────────────────
 
 def _load_model():

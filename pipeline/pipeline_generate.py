@@ -35,6 +35,8 @@ def parse_args():
                         help='JSON class name mapping file')
     parser.add_argument('--examples-dir', type=str, default=None,
                         help='Directory to save per-class Markdown (append Generated Images section, alias of --md)')
+    parser.add_argument('--prompt-file', type=str, default=None,
+                        help='Prompt JSON 配置文件（预留给 generate 阶段扩展）')
     return parser.parse_args()
 
 
@@ -237,7 +239,9 @@ def _detect_gpus():
 
 
 def main():
+    from utils import load_prompts
     args = parse_args()
+    load_prompts(args.prompt_file)  # 验证 prompt 文件，generate 阶段暂无覆盖项
 
     if args.num_gpus == 0:
         num_gpus = _detect_gpus()

@@ -18,11 +18,11 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from config import DESCRIPTIONS_DIR
 from data_txt.imagenet_label_mapping import get_readable_name as _imagenet_class_name
-from utils import cleanup_stale_parts
+from utils import cleanup_stale_parts, load_prompts
 
-extension_prompt = "Besides these descriptions mentioned above, please use the Template 1 to list exactly {number} other possible [distinctive features] and [specific scenes].\nTemplate1: A photo of the class {class_name}, [with distinctive features] in [specific scenes]. \nList the selected sentences numbered from 1 to {number}, one per line. Do not output more than {number} descriptions."
-
-reflection_prompt = "From the provided description list, please select exactly {number} unique sentences for the class '{class_name}'. \nEach sentence must describe a different [distinctive feature] (e.g., texture, shape) or a [specific scene] (e.g., lighting, environment) to ensure diversity. Avoid near-duplicates.\nList the selected sentences numbered from 1 to {number}, one per line. Do not output more than {number} descriptions."
+# 模块级变量，由 main() 从 prompt 文件初始化
+extension_prompt = None
+reflection_prompt = None
 
 
 def setup_logger(name, log_path):
@@ -171,11 +171,23 @@ def parse_args():
                         help='Number of GPUs for class-level parallelism')
     parser.add_argument('--examples-dir', type=str, default=None,
                         help='Directory to save per-class Markdown (append Extended Descriptions section)')
+    parser.add_argument('--prompt-file', type=str, default=None,
+                        help='Prompt JSON 配置文件（默认使用内置 prompt）')
     return parser.parse_args()
 
 
 def main():
+    global extension_prompt, reflection_prompt
     args = parse_args()
+    prompts = load_prompts(args.prompt_file)
+
+    ext_cfg = prompts.get("extend", {})
+    extension_prompt = ext_cfg.get("extension_prompt") or extension_prompt
+    reflection_prompt = ext_cfg.get("reflection_prompt") or reflection_prompt
+    if ext_cfg.get("system_prompt"):
+        from model.text_llm import set_system_prompt
+        set_system_prompt(ext_cfg["system_prompt"])
+
     class_map = None
     if args.class_mapping and os.path.exists(args.class_mapping):
         with open(args.class_mapping) as f:

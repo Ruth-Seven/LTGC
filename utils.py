@@ -77,3 +77,28 @@ def cleanup_stale_parts(output_path, logger=None):
                 logger.info("Removed stale part: %s", stale)
         except OSError:
             pass
+
+
+# ── Prompt 加载 ────────────────────────────────────────────────
+
+DEFAULT_PROMPT_FILE = os.path.join(os.path.dirname(__file__), "prompt", "default.json")
+
+
+def load_prompts(prompt_file=None):
+    """加载 prompt 配置文件。
+
+    Args:
+        prompt_file: JSON prompt 文件路径。为 None 时加载默认配置。
+
+    Returns:
+        dict: { "describe": {...}, "extend": {...}, "generate": {...} }
+    """
+    path = prompt_file or DEFAULT_PROMPT_FILE
+    if not os.path.exists(path):
+        raise FileNotFoundError(f"Prompt file not found: {path}")
+    with open(path, 'r') as f:
+        data = json.load(f)
+    for section in ("describe", "extend", "generate"):
+        if section not in data:
+            data[section] = {}
+    return data

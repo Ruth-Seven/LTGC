@@ -22,7 +22,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from config import IMAGENET_DIR, DESCRIPTIONS_DIR, CLASS_COUNT_FILE
 from data.data_loader import ImageNetLTDataset, SUPPORTED_EXTENSIONS
 from data_txt.imagenet_label_mapping import get_readable_name
-from model.vision_lmm import describe_image_batch, set_backend
+from model.vision_lmm import describe_image_batch, set_backend, preload_model
 from utils import validate_description, cleanup_stale_parts, load_prompts
 from collections import defaultdict, Counter
 
@@ -133,6 +133,7 @@ def _ddp_worker(rank, world_size, args_dict):
     torch.cuda.set_device(0)
 
     set_backend(args_dict['vlm_backend'])
+    preload_model()
 
     log_dir = args_dict['log_dir']
     logger = setup_logger(f"describe_gpu{rank}", os.path.join(log_dir, f"pipeline_describe_gpu{rank}.log"))
@@ -256,6 +257,7 @@ def _merge_parts(output_path, num_gpus, logger):
 
 def _main_single_gpu(args, logger):
     set_backend(args.vlm_backend)
+    preload_model()
 
     description_file = args.existing_description_path
     tmp_file = description_file + ".tmp"

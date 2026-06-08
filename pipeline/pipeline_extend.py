@@ -44,7 +44,9 @@ def _get_class_name(label, class_map):
     return _imagenet_class_name(int(label)).split(", ")[0]
 
 
-def _extend_worker(rank, world_size, class_chunks, max_generate_num, output_base, log_dir, class_map, examples_dir):
+def _extend_worker(rank, world_size, class_chunks, max_generate_num,
+                   output_base, log_dir, class_map, examples_dir,
+                   ext_prompt, ref_prompt):
     os.environ["CUDA_VISIBLE_DEVICES"] = str(rank)
 
     os.makedirs(log_dir, exist_ok=True)
@@ -68,7 +70,7 @@ def _extend_worker(rank, world_size, class_chunks, max_generate_num, output_base
             n_needed = max_generate_num * 2 - len(all_texts)
             raw = extend_descriptions(
                 all_texts,
-                prompt=extension_prompt.format(number=n_needed, class_name=class_name),
+                prompt=ext_prompt.format(number=n_needed, class_name=class_name),
                 number=n_needed,
                 max_token=3000,
             )
@@ -98,7 +100,7 @@ def _extend_worker(rank, world_size, class_chunks, max_generate_num, output_base
         logger.info("Class %s %s: after dedup %d new descriptions", label, class_name, len(new_descs))
         new_descs = reflection_descriptions(
             new_descs,
-            prompt=reflection_prompt.format(number=max_generate_num, class_name=class_name),
+            prompt=ref_prompt.format(number=max_generate_num, class_name=class_name),
             number=max_generate_num,
         )
         logger.info("Class %s %s: after reflection %d descriptions", label, class_name, len(new_descs))
@@ -209,7 +211,8 @@ def main():
     if num_gpus <= 1:
         _extend_worker(0, 1, [grouped], args.max_generate_num,
                        args.extended_description_path, args.log_dir, class_map,
-                       args.examples_dir)
+                       args.examples_dir,
+                       extension_prompt, reflection_prompt)
         return
 
     logger.info("Multi-GPU mode: %d GPUs, %d classes", num_gpus, num_classes)
@@ -221,7 +224,8 @@ def main():
         _extend_worker,
         args=(num_gpus, chunks, args.max_generate_num,
               args.extended_description_path, args.log_dir, class_map,
-              args.examples_dir),
+              args.examples_dir,
+              extension_prompt, reflection_prompt),
         nprocs=num_gpus,
         join=True,
     )

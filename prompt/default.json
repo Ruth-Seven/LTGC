@@ -8,7 +8,6 @@
         "system_prompt": "You are a helpful assistant that generates diverse and detailed image descriptions for image classification datasets."
     },
     "generate": {
-        "reflection_prompt": "From the description '{prompt}', please regenerate a better description for the class '{class_name}'. Each sentence must describe a different [distinctive feature] (e.g., texture, shape) or a [specific scene] (e.g., lighting, environment) to ensure diversity. Avoid near-duplicates.",
-        "template_prompt": "Describe the class '{class_name}' using this format:\n'A photo of the class {class_name}, with [features], in [setting].'"
-    }
+        "reflect_one_prompt": "From the description '{prompt}', please regenerate a better description for the class '{class_name}'. Each sentence must describe a different [distinctive feature] (e.g., texture, shape) or a [specific scene] (e.g., lighting, environment) to ensure diversity. Avoid near-duplicates."
+        }
 }

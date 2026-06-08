@@ -138,7 +138,16 @@ def _ddp_worker(rank, world_size, args_dict):
     set_backend(args_dict['vlm_backend'])
 
     log_dir = args_dict['log_dir']
-    logger = setup_logger(f"describe_gpu{rank}", os.path.join(log_dir, f"pipeline_describe_gpu{rank}.log"))
+    log_path = os.path.join(log_dir, f"pipeline_describe_gpu{rank}.log")
+    logger = setup_logger(f"describe_gpu{rank}", log_path)
+
+    # 路由 vision_lmm / text_llm 模块日志到同一个 GPU 文件
+    import model.vision_lmm as _vlm
+    _vlm._log.handlers.clear()
+    _vlm._log.addHandler(logger.handlers[0])
+    _vlm._log.setLevel(logging.INFO)
+    _vlm._log.propagate = False
+
     logger.info("DDP worker rank %d/%d initializing (batch_size=%d)...",
                 rank, world_size, args_dict.get('batch_size', 6))
 
@@ -260,6 +269,13 @@ def _merge_parts(output_path, num_gpus, logger):
 
 def _main_single_gpu(args, logger):
     set_backend(args.vlm_backend)
+
+    # 路由 vision_lmm 日志到 describe 文件
+    import model.vision_lmm as _vlm
+    _vlm._log.handlers.clear()
+    _vlm._log.addHandler(logger.handlers[0])
+    _vlm._log.setLevel(logging.INFO)
+    _vlm._log.propagate = False
 
     description_file = args.existing_description_path
     tmp_file = description_file + ".tmp"

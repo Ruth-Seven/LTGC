@@ -4,10 +4,13 @@
 """
 import torch
 import time
+import logging
 from transformers import AutoProcessor
 from PIL import Image
 
 from config import LOCAL_VLM_ID, VLM_MAX_TOKENS, LLAVA_MODEL_ID, QWEN2VL_MODEL_ID
+
+_log = logging.getLogger("vision_lmm")
 
 try:
     from transformers import LlavaForConditionalGeneration
@@ -49,7 +52,7 @@ def set_model_path(path):
     """
     global _model_path, _model, _processor
     if _model is not None:
-        print("[vision_llm] Unloading existing model (path changed)")
+        _log.info("Unloading existing model (path changed)")
         del _model
         del _processor
         _model = None
@@ -77,7 +80,7 @@ def _load_model():
     else:
         raise ValueError(f"Unknown backend: {_backend}")
 
-    print(f"[vision_llm] Loading VLM model (backend={_backend}): {_model_path} ...")
+    _log.info(f"Loading VLM model (backend={_backend}): {_model_path} ...")
     dtype = torch.float16 if torch.cuda.is_available() else torch.float32
 
     try:
@@ -87,7 +90,7 @@ def _load_model():
             device_map="auto",
         )
     except torch.cuda.OutOfMemoryError:
-        print("[vision_llm] GPU OOM, falling back to CPU (float32)...")
+        _log.info("GPU OOM, falling back to CPU (float32)...")
         torch.cuda.empty_cache()
         _model = ModelClass.from_pretrained(
             _model_path,
@@ -96,7 +99,7 @@ def _load_model():
         )
 
     _processor = AutoProcessor.from_pretrained(_model_path)
-    print("[vision_llm] VLM model loaded.")
+    _log.info("VLM model loaded.")
     return _model, _processor
 
 
@@ -191,19 +194,19 @@ def describe_image_batch(image_tensors, text_prompts, max_retries=2):
             return responses
 
         except torch.cuda.OutOfMemoryError:
-            print(f"[vision_llm] CUDA OOM batch (attempt {attempt + 1}/{max_retries})")
+            _log.warning(f"CUDA OOM batch (attempt {attempt + 1}/{max_retries})")
             torch.cuda.empty_cache()
         except RuntimeError as e:
             if "CUDA out of memory" in str(e):
-                print(f"[vision_llm] CUDA OOM batch (attempt {attempt + 1}/{max_retries})")
+                _log.warning(f"CUDA OOM batch (attempt {attempt + 1}/{max_retries})")
                 torch.cuda.empty_cache()
             else:
-                print(f"[vision_llm] Runtime error: {e}")
+                _log.error(f"Runtime error: {e}")
                 break
         except Exception as e:
-            print(f"[vision_llm] Batch inference failed (attempt {attempt + 1}/{max_retries}): {e}")
+            _log.warning(f"Batch inference failed (attempt {attempt + 1}/{max_retries}): {e}")
             if attempt < max_retries - 1:
                 time.sleep(1)
 
-    print("[vision_llm] All retries exhausted, returning empty batch")
+    _log.info("All retries exhausted, returning empty batch")
     return [""] * B

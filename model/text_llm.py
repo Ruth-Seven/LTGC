@@ -4,6 +4,7 @@
 """
 import torch
 import re
+import logging
 import requests
 import json
 from transformers import AutoModelForCausalLM, AutoTokenizer
@@ -11,6 +12,8 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 from config import (
     TEXT_LLM_MODEL_ID, TEXT_LLM_MAX_TOKENS, TEXT_LLM_TEMPERATURE,
 )
+
+_log = logging.getLogger("text_llm")
 
 _model = None
 _tokenizer = None
@@ -32,7 +35,7 @@ def _load_model():
     if _model is not None:
         return _model, _tokenizer
 
-    print(f"[text_llm] Loading local model {TEXT_LLM_MODEL_ID} ...")
+    _log.info(f"Loading local model {TEXT_LLM_MODEL_ID} ...")
     dtype = torch.float16 if torch.cuda.is_available() else torch.float32
 
     _model = AutoModelForCausalLM.from_pretrained(
@@ -41,7 +44,7 @@ def _load_model():
         device_map="auto",
     )
     _tokenizer = AutoTokenizer.from_pretrained(TEXT_LLM_MODEL_ID)
-    print("[text_llm] Model loaded.")
+    _log.info("Model loaded.")
     return _model, _tokenizer
 
 
@@ -50,7 +53,7 @@ def _unload_model():
     _model = None
     _tokenizer = None
     torch.cuda.empty_cache()
-    print("[text_llm] Model unloaded.")
+    _log.info("Model unloaded.")
 
 
 def _generate_local(messages, max_tokens, temperature, do_sample, top_p):
@@ -90,7 +93,7 @@ def extend_descriptions(existing_texts, prompt, number, max_token=TEXT_LLM_MAX_T
         {"role": "user", "content": f"Existing descriptions:\n{existing_block}\n\n{prompt}"},
     ]
     response = _generate(messages, max_tokens=max_token, temperature=temperature)
-    print(f"[text_llm] extend: {len(existing_texts)} existing → raw response {len(response)} chars")
+    _log.info(f"extend: {len(existing_texts)} existing → raw response {len(response)} chars")
 
     sentences = re.split(r'\n\d+[\.\)]\s*|\n-\s*|\n', response)
     result = []
@@ -101,7 +104,7 @@ def extend_descriptions(existing_texts, prompt, number, max_token=TEXT_LLM_MAX_T
             if s and s.count('[') == 0 and s.count(']') == 0:
                 result.append(s)
     result = list(dict.fromkeys(result))
-    print(f"[text_llm] extend: parsed {len(result)} descriptions, returning {min(len(result), number)}")
+    _log.info(f"extend: parsed {len(result)} descriptions, returning {min(len(result), number)}")
     return result[:number]
 
 
@@ -114,7 +117,7 @@ def reflection_descriptions(texts, prompt, number, max_token=TEXT_LLM_MAX_TOKENS
         {"role": "user", "content": f"Existing descriptions:\n{existing_block}\n\n{prompt}"},
     ]
     response = _generate(messages, max_tokens=max_token, temperature=temperature, do_sample=False)
-    print(f"[text_llm] reflection: {len(texts)} existing → raw response {len(response)} chars")
+    _log.info(f"reflection: {len(texts)} existing → raw response {len(response)} chars")
 
     sentences = re.split(r'\n\d+[\.\)]\s*|\n-\s*|\n', response)
     result = []
@@ -125,7 +128,7 @@ def reflection_descriptions(texts, prompt, number, max_token=TEXT_LLM_MAX_TOKENS
             if s and s.count('[') == 0 and s.count(']') == 0:
                 result.append(s)
     result = list(dict.fromkeys(result))
-    print(f"[text_llm] reflection: parsed {len(result)} descriptions, returning {min(len(result), number)}")
+    _log.info(f"reflection: parsed {len(result)} descriptions, returning {min(len(result), number)}")
     return result[:number]
 
 

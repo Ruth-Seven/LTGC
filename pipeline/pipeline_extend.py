@@ -50,7 +50,15 @@ def _extend_worker(rank, world_size, class_chunks, max_generate_num,
     os.environ["CUDA_VISIBLE_DEVICES"] = str(rank)
 
     os.makedirs(log_dir, exist_ok=True)
-    logger = setup_logger(f"extend_gpu{rank}", os.path.join(log_dir, f"pipeline_extend_gpu{rank}.log"))
+    log_path = os.path.join(log_dir, f"pipeline_extend_gpu{rank}.log")
+    logger = setup_logger(f"extend_gpu{rank}", log_path)
+
+    # 路由 text_llm 模块日志到同一个 GPU 文件
+    import model.text_llm as _tllm
+    _tllm._log.handlers.clear()
+    _tllm._log.addHandler(logger.handlers[0])
+    _tllm._log.setLevel(logging.INFO)
+    _tllm._log.propagate = False
 
     from model.text_llm import extend_descriptions, reflection_descriptions, _unload_model
 

@@ -132,7 +132,7 @@ def reflection_descriptions(texts, prompt, number, max_token=TEXT_LLM_MAX_TOKENS
     return result[:number]
 
 
-def refine_description(text, class_name, prompt=None):
+def reflect_one_description(text, class_name, prompt=None):
     """润色描述
 
     Args:
@@ -147,7 +147,7 @@ def refine_description(text, class_name, prompt=None):
             "Make it start with 'A photo of the class {class_name}' "
             "and focus on distinctive visual features."
         )
-    user_content = prompt.format(class_name=class_name, text=text)
+    user_content = prompt.format(class_name=class_name, prompt=text)
     messages = [
         {"role": "system", "content": SYSTEM_PROMPT},
         {"role": "user", "content": user_content},

@@ -9,6 +9,6 @@
         "system_prompt": "You are a helpful assistant that generates diverse and detailed image descriptions for image classification datasets."
     },
     "generate": {
-        "reflect_one_prompt": "From the description: '{description}', please regenerate a better description for the class '{class_name}'. Each sentence must describe a different [distinctive feature] (e.g., texture, shape) or a [specific scene] (e.g., lighting, environment) to ensure diversity. Avoid near-duplicates."
+        "reflect_one_prompt": "From the description above, please regenerate a better description for the class '{class_name}'. The sentence must describe a different [distinctive feature] (e.g., texture, shape) or a [specific scene] (e.g., lighting, environment) to ensure diversity. Avoid near-duplicates."
     }
 }

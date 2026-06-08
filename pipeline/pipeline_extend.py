@@ -102,7 +102,8 @@ def _extend_worker(rank, world_size, class_chunks, max_generate_num,
                     prompt=det_prompt,
                     enable_thinking=False,
                     max_token=10 * len(fresh),
-                    temperature=0,
+                    temperature=0.1,
+                    do_sample=False,
                 )
             if reflect_list:
                 reflected = reflection_descriptions(
@@ -111,7 +112,8 @@ def _extend_worker(rank, world_size, class_chunks, max_generate_num,
                     number=len(reflect_list),
                     enable_thinking=True,
                     max_token=200 * len(reflect_list),
-                    temperature=0,
+                    temperature=0.3,
+                    do_sample=True,
                 )
                 new_fresh = fresh[:]
                 for idx, sentence in zip(reflect_list, reflected):

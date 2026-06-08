@@ -74,7 +74,7 @@ def _extend_worker(rank, world_size, class_chunks, max_generate_num,
         logger.info("Class %s %s (%d/%d): %d existing", label, class_name, idx + 1, total, n_existing)
 
         # 每条 existing desc 扩展 N 倍
-        per_text = max(1, max_generate_num // n_existing) if n_existing > 0 else max_generate_num
+        per_text = max(1, -(-max_generate_num // n_existing)) if n_existing > 0 else max_generate_num
         all_new = []
 
         for ti, text in enumerate(texts):

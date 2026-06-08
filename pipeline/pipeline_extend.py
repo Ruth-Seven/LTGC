@@ -18,7 +18,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from config import DESCRIPTIONS_DIR
 from data_txt.imagenet_label_mapping import get_readable_name as _imagenet_class_name
-from utils import cleanup_stale_parts, load_prompts
+from utils import cleanup_stale_parts, load_prompts, validate_description
 
 # 模块级变量，由 main() 从 prompt 文件初始化
 extension_prompt = None
@@ -82,17 +82,13 @@ def _extend_worker(rank, world_size, class_chunks, max_generate_num,
                 [text],
                 prompt=ext_prompt.format(number=per_text, class_name=class_name),
                 number=per_text,
-                max_token=3000,
+                max_token=200 * per_text,
             )
             logger.info("Class %s %s [%d/%d]: generated %d raw", label, class_name, ti + 1, n_existing, len(raw))
 
             # 质量过滤
             fresh = list(dict.fromkeys(raw))
-            fresh = [d for d in fresh
-                     if len(d) > 30
-                     and '[' not in d and ']' not in d
-                     and ', with' in d.lower()
-                     and ', in' in d.lower()]
+            fresh = [d for d in fresh if validate_description(d, class_name)]
             logger.info("Class %s %s [%d/%d]: after filter %d", label, class_name, ti + 1, n_existing, len(fresh))
 
             if not fresh:

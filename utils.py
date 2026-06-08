@@ -41,7 +41,7 @@ def validate_description(description, class_name):
 
     规则:
     1. 必须以 "A photo of" 开头 (不允许 painting/drawing 等)
-    2. 必须包含 "class {class_name}" (保留模板类名标识)
+    2. 必须包含 "{class_name}" (保留模板类名标识)
 
     Returns:
         bool: True 表示通过校验
@@ -56,7 +56,7 @@ def validate_description(description, class_name):
     if _photo_check.search(desc):
         return False
 
-    if f"class {class_name}".lower() not in desc.lower():
+    if f"{class_name}".lower() not in desc.lower():
         return False
 
     return True

@@ -24,7 +24,7 @@ from config import IMAGENET_DIR, DESCRIPTIONS_DIR, CLASS_COUNT_FILE
 from data.data_loader import ImageNetLTDataset, SUPPORTED_EXTENSIONS
 from data_txt.imagenet_label_mapping import get_readable_name
 from model.vision_lmm import describe_image_batch, set_backend
-from utils import validate_description, cleanup_stale_parts, load_prompts, _photo_check
+from utils import cleanup_stale_parts, load_prompts, _photo_check
 from collections import defaultdict, Counter
 
 
@@ -58,16 +58,11 @@ def _describe_with_retry(group_imgs, name, logger, vlm_prompt):
             if not desc:
                 continue
             desc = desc.strip().strip("'\"")
-            # 不以 "A photo of" 开头 或 匹配 non-photo 模式 → 直接拒绝
+            # 只保留 "A photo of" + non-photo 检查
             if not re.match(r"^A photo of", desc, re.IGNORECASE) or _photo_check.search(desc):
                 logger.info("[VLM rejected] class=%s: %s", name, desc)
                 continue
-            # 缺乏 "class {name}" → 自动补上
-            if f"class {name}".lower() not in desc.lower():
-                desc = re.sub(r"(?i)^A photo of (a |an )?", f"A photo of the class {name} ", desc)
-                logger.info("[VLM fixed] class=%s: %s", name, desc)
-            else:
-                logger.info("[VLM output] class=%s: %s", name, desc)
+            logger.info("[VLM output] class=%s: %s", name, desc)
             results[idx] = desc
 
         still_failed = sum(1 for r in results if not r)

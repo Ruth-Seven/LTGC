@@ -8,7 +8,7 @@ import torch
 import os
 from PIL import Image
 
-from config import CLIP_BACKEND, CLIP_MODEL_NAME, get_device
+from config import CLIP_BACKEND, CLIP_MODEL_NAME
 
 
 # ── OpenAI backend ─────────────────────────────────────────────
@@ -23,7 +23,7 @@ def _load_openai():
         return _openai_model, _openai_preprocess, _device
 
     import clip
-    _device = get_device("clip") if torch.cuda.is_available() else "cpu"
+    _device = "cuda:0" if torch.cuda.is_available() else "cpu"
     print(f"[clip_score] Loading OpenAI CLIP (ViT-B/32) on {_device}...")
     _openai_model, _openai_preprocess = clip.load("ViT-B/32", device=_device)
     print("[clip_score] CLIP loaded.")
@@ -57,7 +57,7 @@ def _load_hf():
         return _hf_model, _hf_processor, _device
 
     from transformers import CLIPModel, CLIPProcessor
-    _device = get_device("clip") if torch.cuda.is_available() else "cpu"
+    _device = "cuda:0" if torch.cuda.is_available() else "cpu"
     print(f"[clip_score] Loading HF CLIP ({CLIP_MODEL_NAME}) on {_device}...")
     _hf_model = CLIPModel.from_pretrained(CLIP_MODEL_NAME, local_files_only=True).to(_device)
     _hf_processor = CLIPProcessor.from_pretrained(CLIP_MODEL_NAME, local_files_only=True)

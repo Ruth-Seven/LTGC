@@ -125,8 +125,7 @@ def reflection_descriptions(texts, prompt, number, max_token=TEXT_LLM_MAX_TOKENS
         s = s.strip()
         if s.startswith('A photo'):
             s = s.split('\n')[0].strip()
-            if s and s.count('[') == 0 and s.count(']') == 0:
-                result.append(s)
+            result.append(s)
     result = list(dict.fromkeys(result))
     _log.info(f"reflection: parsed {len(result)} descriptions, returning {min(len(result), number)}")
     return result[:number]
@@ -147,7 +146,7 @@ def reflect_one_description(text, class_name, prompt=None):
             "Make it start with 'A photo of the class {class_name}' "
             "and focus on distinctive visual features."
         )
-    user_content = prompt.format(class_name=class_name, prompt=text)
+    user_content = prompt.format(class_name=class_name, text=text, prompt=text, number=1)
     messages = [
         {"role": "system", "content": SYSTEM_PROMPT},
         {"role": "user", "content": user_content},

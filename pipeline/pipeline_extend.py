@@ -70,59 +70,57 @@ def _extend_worker(rank, world_size, class_chunks, max_generate_num,
 
     for idx, (label, texts) in enumerate(class_list):
         class_name = _get_class_name(label, class_map)
-        logger.info("Class %s %s (%d/%d): %d existing", label, class_name, idx + 1, total, len(texts))
+        n_existing = len(texts)
+        logger.info("Class %s %s (%d/%d): %d existing", label, class_name, idx + 1, total, n_existing)
 
-        new_descs = []
-        while len(texts) + len(new_descs) < max_generate_num * 2:
-            all_texts = texts + new_descs
-            n_needed = max_generate_num * 2 - len(all_texts)
+        # 每条 existing desc 扩展 N 倍
+        per_text = max(1, max_generate_num // n_existing) if n_existing > 0 else max_generate_num
+        all_new = []
+
+        for ti, text in enumerate(texts):
             raw = extend_descriptions(
-                all_texts,
-                prompt=ext_prompt.format(number=n_needed, class_name=class_name),
-                number=n_needed,
+                [text],
+                prompt=ext_prompt.format(number=per_text, class_name=class_name),
+                number=per_text,
                 max_token=3000,
             )
-            logger.info("Class %s %s: generated %d raw descriptions", label, class_name, len(raw))
-            fresh = list(dict.fromkeys(raw))
-            if len(fresh) < len(raw):
-                logger.info("Class %s %s: dedup within batch removed %d duplicates",
-                            label, class_name, len(raw) - len(fresh))
-            fresh = [
-                d for d in fresh
-                if len(d) > 30
-                and '[' not in d and ']' not in d
-                and ', with' in d.lower()
-                and ', in' in d.lower()
-            ]
-            logger.info("Class %s %s: after quality filter %d descriptions", label, class_name, len(fresh))
-            for desc in fresh:
-                logger.info("  - %s", desc)
-            if not fresh:
-                logger.info("No valid new descriptions, stopping")
-                break
-            logger.info("Class %s %s: before reflection %d descriptions",
-                        label, class_name, len(new_descs) + len(fresh))
-            new_descs.extend(fresh)
-            new_descs = list(set(new_descs))
+            logger.info("Class %s %s [%d/%d]: generated %d raw", label, class_name, ti + 1, n_existing, len(raw))
 
-        logger.info("Class %s %s: after dedup %d new descriptions", label, class_name, len(new_descs))
-        new_descs = reflection_descriptions(
-            new_descs,
-            prompt=ref_prompt.format(number=max_generate_num, class_name=class_name),
-            number=max_generate_num,
-        )
-        logger.info("Class %s %s: after reflection %d descriptions", label, class_name, len(new_descs))
-        for desc in new_descs:
-            logger.info("  - %s", desc)
+            # 质量过滤
+            fresh = list(dict.fromkeys(raw))
+            fresh = [d for d in fresh
+                     if len(d) > 30
+                     and '[' not in d and ']' not in d
+                     and ', with' in d.lower()
+                     and ', in' in d.lower()]
+            logger.info("Class %s %s [%d/%d]: after filter %d", label, class_name, ti + 1, n_existing, len(fresh))
+
+            if not fresh:
+                continue
+
+            # 每条扩展完立即 reflect
+            reflected = reflection_descriptions(
+                fresh,
+                prompt=ref_prompt.format(number=per_text, class_name=class_name),
+                number=per_text,
+            )
+            logger.info("Class %s %s [%d/%d]: after reflection %d", label, class_name, ti + 1, n_existing, len(reflected))
+            for desc in reflected:
+                logger.info("  - %s", desc)
+            all_new.extend(reflected)
+
+        all_new = list(dict.fromkeys(all_new))  # 全局去重
+        logger.info("Class %s %s: total after dedup %d descriptions", label, class_name, len(all_new))
+        for desc in all_new:
             data_to_write.append((label, desc))
 
-        if examples_dir and new_descs:
+        if examples_dir and all_new:
             os.makedirs(examples_dir, exist_ok=True)
             safe_name = class_name.replace(' ', '_').replace('/', '_')
             md_path = os.path.join(examples_dir, f"{label}_{safe_name}.md")
             with open(md_path, 'a') as f:
-                f.write(f"\n## Extended Descriptions ({len(new_descs)})\n\n")
-                for k, desc in enumerate(new_descs, 1):
+                f.write(f"\n## Extended Descriptions ({len(all_new)})\n\n")
+                for k, desc in enumerate(all_new, 1):
                     f.write(f"{k}. {desc}\n")
                 f.write("\n")
 

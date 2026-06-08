@@ -242,7 +242,7 @@ def main():
     from utils import load_prompts
     args = parse_args()
     prompts = load_prompts(args.prompt_file)
-    args.refine_prompt = prompts.get("extend", {}).get("refine_prompt")
+    args.refine_prompt = prompts.get("generate", {}).get("reflection_prompt")
 
     if args.num_gpus == 0:
         num_gpus = _detect_gpus()

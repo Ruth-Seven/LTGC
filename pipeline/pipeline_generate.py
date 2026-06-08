@@ -14,13 +14,16 @@ import torch.multiprocessing as mp
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from config import DATA_DIR, EXTENDED_DESCRIPTION_PATH
+from utils import validate_description
+
 
 def parse_args():
     parser = argparse.ArgumentParser(description='LTGC Step 3: Text -> Image')
     parser.add_argument('-ext', '--extended_description_path',
-                        default="/data/descriptions_data/extended_description.csv",
+                        default=EXTENDED_DESCRIPTION_PATH,
                         help='Extended descriptions CSV')
-    parser.add_argument('-d', '--data_dir', default="/data", help='Output root')
+    parser.add_argument('-d', '--data_dir', default=DATA_DIR, help='Output root')
     parser.add_argument('-t', '--thresh', default=0.28, type=float, help='CLIP score threshold')
     parser.add_argument('-r', '--max_rounds', default=5, type=int, help='Max retry rounds')
     parser.add_argument('-m', '--md', default=None, nargs='?', const="/tmp/gen_examples",
@@ -104,39 +107,52 @@ def _worker(rank, world_size, class_chunks, args, examples_dir):
         class_name = _class_name(label)
         dir_path = os.path.join(args.data_dir, str(label))
         os.makedirs(dir_path, exist_ok=True)
-        texts = [f'A photo of a {class_name}' for t in texts]
-        logger.info("Class %s (%d/%d), %d descriptions", label, label_idx + 1, total, len(texts))
+        generation_prompts = [
+            str(t).strip() if not pd.isna(t) and str(t).strip()
+            else f'A photo of a {class_name}'
+            for t in texts
+        ]
+        clip_prompt = f'A photo of a {class_name}'
+        logger.info(
+            "Class %s (%d/%d), %d descriptions",
+            label, label_idx + 1, total, len(generation_prompts),
+        )
 
         if args.onepath:
-            for text_i, text in enumerate(texts):
+            for text_i, generation_prompt in enumerate(generation_prompts):
                 saved_path = os.path.join(args.data_dir, 'gen_train-onepath.JPEG')
                 accepted = False
                 for attempt in range(args.max_rounds):
-                    img_path = generate(text, saved_path)
+                    img_path = generate(generation_prompt, saved_path)
                     if img_path is None:
                         continue
-                    clip_score = score(img_path, text)
+                    clip_score = score(img_path, clip_prompt)
                     logger.info("Class %s (%d/%d): Attempt %d/%d, Score: %.4f Class: %s",
                                 label, label_idx + 1, total, attempt + 1, args.max_rounds, clip_score, class_name)
                     if clip_score >= args.thresh:
                         logger.info("accepted")
                         if examples_dir:
-                            gen_records[label].append((text, clip_score, img_path))
+                            gen_records[label].append((generation_prompt, clip_score, img_path))
                         accepted = True
                         break
                     else:
                         logger.info("Score %.4f < %s", clip_score, args.thresh)
                         if attempt < args.max_rounds - 1:
-                            refined = reflect_one_description(text, class_name, prompt=args.reflect_one_prompt)
-                            if refined:
+                            refined = reflect_one_description(
+                                generation_prompt, class_name,
+                                prompt=args.reflect_one_prompt,
+                            )
+                            if refined and validate_description(refined, class_name):
                                 logger.info("Refined: %s", refined)
-                                text = refined
+                                generation_prompt = refined
+                            elif refined:
+                                logger.info("Refined rejected: %s", refined)
                 unload_text_llm()
                 if not accepted:
                     logger.info("All attempts failed, skip")
             continue
 
-        n = len(texts)
+        n = len(generation_prompts)
         save_paths = [os.path.join(dir_path, f"{label}_{i}.JPEG") for i in range(n)]
         accepted = [False] * n
         bs = args.batch
@@ -151,7 +167,7 @@ def _worker(rank, world_size, class_chunks, args, examples_dir):
                 if not pending:
                     break
 
-                batch_prompts = [texts[i] for i in pending]
+                batch_prompts = [generation_prompts[i] for i in pending]
                 batch_paths = [save_paths[i] for i in pending]
                 img_paths = generate_batch(batch_prompts, batch_paths)
                 unload_sd()
@@ -161,8 +177,9 @@ def _worker(rank, world_size, class_chunks, args, examples_dir):
                     break
 
                 v_idx, v_paths = zip(*valid)
-                v_texts = [texts[i] for i in v_idx]
-                clip_scores = score_batch(list(v_paths), list(v_texts))
+                clip_scores = score_batch(
+                    list(v_paths), [clip_prompt] * len(v_paths)
+                )
 
                 for idx, s in zip(v_idx, clip_scores):
                     logger.info("Class %s (%d/%d): Attempt %d/%d, Score: %.4f Class: %s",
@@ -170,7 +187,7 @@ def _worker(rank, world_size, class_chunks, args, examples_dir):
                     if s >= args.thresh:
                         logger.info("accepted")
                         if examples_dir:
-                            gen_records[label].append((texts[idx], s, save_paths[idx]))
+                            gen_records[label].append((generation_prompts[idx], s, save_paths[idx]))
                         accepted[idx] = True
                     else:
                         logger.info("Score %.4f < %s", s, args.thresh)
@@ -178,10 +195,15 @@ def _worker(rank, world_size, class_chunks, args, examples_dir):
                 if attempt < args.max_rounds - 1:
                     for i in chunk_ids:
                         if not accepted[i]:
-                            refined = reflect_one_description(texts[i], class_name, prompt=args.reflect_one_prompt)
-                            if refined:
+                            refined = reflect_one_description(
+                                generation_prompts[i], class_name,
+                                prompt=args.reflect_one_prompt,
+                            )
+                            if refined and validate_description(refined, class_name):
                                 logger.info("Refined: %s", refined)
-                                texts[i] = refined
+                                generation_prompts[i] = refined
+                            elif refined:
+                                logger.info("Refined rejected: %s", refined)
                     unload_text_llm()
 
                 if all(accepted[i] for i in chunk_ids):

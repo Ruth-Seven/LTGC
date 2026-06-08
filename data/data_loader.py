@@ -11,7 +11,7 @@ from torchvision import transforms
 from PIL import Image
 
 
-SUPPORTED_EXTENSIONS = {'.png', '.jpg', '.jpeg', '.JPEG', '.bmp'}
+SUPPORTED_EXTENSIONS = {'.png', '.jpg', '.jpeg', '.bmp'}
 
 
 class BalancedSampler(Sampler):

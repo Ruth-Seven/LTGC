@@ -14,6 +14,7 @@ import torch.multiprocessing as mp
 
 import pandas as pd
 
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from config import DESCRIPTIONS_DIR
@@ -23,6 +24,7 @@ from utils import cleanup_stale_parts, load_prompts, validate_description
 # 模块级变量，由 main() 从 prompt 文件初始化
 extension_prompt = None
 reflection_prompt = None
+determine_prompt = None
 
 
 def setup_logger(name, log_path):
@@ -46,7 +48,7 @@ def _get_class_name(label, class_map):
 
 def _extend_worker(rank, world_size, class_chunks, max_generate_num,
                    output_base, log_dir, class_map, examples_dir,
-                   ext_prompt, ref_prompt):
+                   ext_prompt, det_prompt, ref_prompt):
     os.environ["CUDA_VISIBLE_DEVICES"] = str(rank)
 
     os.makedirs(log_dir, exist_ok=True)
@@ -60,7 +62,7 @@ def _extend_worker(rank, world_size, class_chunks, max_generate_num,
     _tllm._log.setLevel(logging.INFO)
     _tllm._log.propagate = False
 
-    from model.text_llm import extend_descriptions, reflection_descriptions, _unload_model
+    from model.text_llm import extend_descriptions, determine_descriptions, reflection_descriptions, _unload_model
 
     class_list = class_chunks[rank]
     part_path = f"{output_base}.part{rank}"
@@ -85,20 +87,43 @@ def _extend_worker(rank, world_size, class_chunks, max_generate_num,
                 [text],
                 prompt=ext_prompt.format(number=per_text, class_name=class_name),
                 number=per_text,
-                max_token=200 * per_text,
+                enable_thinking=False,
+                max_token=100 * per_text,
+                temperature=0.7,
             )
             # 质量过滤
             unique_raw = list(dict.fromkeys(raw))
             fresh = [d for d in unique_raw if validate_description(d, class_name)]
 
-            reflected = []
+            reflect_list = []
             if fresh:
-                # 每条扩展完立即 reflect
-                reflected = reflection_descriptions(
+                reflect_list = determine_descriptions(
                     fresh,
-                    prompt=ref_prompt.format(number=per_text, class_name=class_name),
-                    number=per_text,
+                    prompt=det_prompt,
+                    enable_thinking=False,
+                    max_token=10 * len(fresh),
+                    temperature=0,
                 )
+            if reflect_list:
+                reflected = reflection_descriptions(
+                    [fresh[idx - 1] for idx in reflect_list],
+                    prompt=ref_prompt.format(number=len(reflect_list), class_name=class_name),
+                    number=len(reflect_list),
+                    enable_thinking=True,
+                    max_token=200 * len(reflect_list),
+                    temperature=0,
+                )
+                new_fresh = fresh[:]
+                for idx, sentence in zip(reflect_list, reflected):
+                    target_idx = idx - 1
+                    if validate_description(sentence, class_name):
+                        new_fresh[target_idx] = sentence
+                    else:
+                        logger.info("[class %s %s] reflect %d rejected by validation: %s",
+                            label, class_name, idx, sentence)
+                reflected = new_fresh[:per_text]
+            else:
+                reflected = fresh[:per_text]
 
             logger.info("")
             logger.info(
@@ -203,12 +228,13 @@ def parse_args():
 
 
 def main():
-    global extension_prompt, reflection_prompt
+    global extension_prompt, determine_prompt, reflection_prompt
     args = parse_args()
     prompts = load_prompts(args.prompt_file)
 
     ext_cfg = prompts.get("extend", {})
     extension_prompt = ext_cfg.get("extension_prompt") or extension_prompt
+    determine_prompt = ext_cfg.get("determine_prompt") or determine_prompt
     reflection_prompt = ext_cfg.get("reflection_prompt") or reflection_prompt
     if ext_cfg.get("system_prompt"):
         from model.text_llm import set_system_prompt
@@ -236,7 +262,7 @@ def main():
         _extend_worker(0, 1, [grouped], args.max_generate_num,
                        args.extended_description_path, args.log_dir, class_map,
                        args.examples_dir,
-                       extension_prompt, reflection_prompt)
+                       extension_prompt, determine_prompt, reflection_prompt)
         return
 
     logger.info("Multi-GPU mode: %d GPUs, %d classes", num_gpus, num_classes)
@@ -249,7 +275,7 @@ def main():
         args=(num_gpus, chunks, args.max_generate_num,
               args.extended_description_path, args.log_dir, class_map,
               args.examples_dir,
-              extension_prompt, reflection_prompt),
+              extension_prompt, determine_prompt, reflection_prompt),
         nprocs=num_gpus,
         join=True,
     )

@@ -54,11 +54,18 @@ def _unload_model():
     _log.info("Model unloaded.")
 
 
-def _generate_local(messages, max_tokens, temperature, do_sample, top_p):
+def _generate_local(messages, max_tokens, temperature, do_sample, top_p,
+                    enable_thinking=None):
     model, tokenizer = _load_model()
 
+    template_kwargs = {}
+    if enable_thinking is not None:
+        template_kwargs["enable_thinking"] = enable_thinking
     text = tokenizer.apply_chat_template(
-        messages, tokenize=False, add_generation_prompt=True
+        messages,
+        tokenize=False,
+        add_generation_prompt=True,
+        **template_kwargs,
     )
     inputs = tokenizer(text, return_tensors="pt").to(model.device)
 
@@ -77,20 +84,30 @@ def _generate_local(messages, max_tokens, temperature, do_sample, top_p):
 
 # ── Dispatch ───────────────────────────────────────────────────
 
-def _generate(messages, max_tokens=TEXT_LLM_MAX_TOKENS, temperature=TEXT_LLM_TEMPERATURE, do_sample=True, top_p=0.9):
-    return _generate_local(messages, max_tokens, temperature, do_sample, top_p)
+def _generate(messages, max_tokens=TEXT_LLM_MAX_TOKENS,
+              temperature=TEXT_LLM_TEMPERATURE, do_sample=True, top_p=0.9,
+              enable_thinking=None):
+    return _generate_local(
+        messages, max_tokens, temperature, do_sample, top_p,
+        enable_thinking=enable_thinking,
+    )
 
 
 # ── Public API ─────────────────────────────────────────────────
 
-def extend_descriptions(existing_texts, prompt, number, max_token=TEXT_LLM_MAX_TOKENS, temperature=TEXT_LLM_TEMPERATURE):
+def extend_descriptions(existing_texts, prompt, number, enable_thinking=False, max_token=TEXT_LLM_MAX_TOKENS, temperature=TEXT_LLM_TEMPERATURE):
     """基于已有描述生成新的多样化描述，截断到 number"""
     existing_block = "\n".join(f"- {t}" for t in existing_texts)
     messages = [
         {"role": "system", "content": SYSTEM_PROMPT},
         {"role": "user", "content": f"Existing descriptions:\n{existing_block}\n\n{prompt}"},
     ]
-    response = _generate(messages, max_tokens=max_token, temperature=temperature)
+    response = _generate(
+        messages,
+        max_tokens=max_token,
+        temperature=temperature,
+        enable_thinking=enable_thinking,
+    )
 
     sentences = re.split(r'\n\d+[\.\)]\s*|\n-\s*|\n', response)
     result = []
@@ -108,15 +125,45 @@ def extend_descriptions(existing_texts, prompt, number, max_token=TEXT_LLM_MAX_T
     return result[:number]
 
 
+def determine_descriptions(existing_texts, prompt, enable_thinking=False, max_token=TEXT_LLM_MAX_TOKENS, temperature=TEXT_LLM_TEMPERATURE):
+    """返回需要 reflection 的 1-based description 序号。"""
+    existing_block = ""
+    for idx, text in enumerate(existing_texts):
+        existing_block += f"{idx + 1}. {text}\n"
+    messages = [
+        {"role": "system", "content": SYSTEM_PROMPT},
+        {"role": "user", "content": f"Existing descriptions:\n{existing_block}\n\n{prompt}"},
+    ]
+    response = _generate(
+        messages,
+        max_tokens=max_token,
+        temperature=temperature,
+        enable_thinking=enable_thinking,
+    )
 
-def reflection_descriptions(texts, prompt, number, max_token=TEXT_LLM_MAX_TOKENS, temperature=0.2):
+    result = [int(sentence) for sentence in re.findall(r"\b\d+\b", response)]
+    result = list(dict.fromkeys(result))
+    result = [num for num in result if 1 <= num <= len(existing_texts)]
+    _log.info(f"determine: have {len(result)} to reflect: {result}")
+
+    _log.warning(f"@@@@@@@@@ {response}")
+
+    return result
+
+def reflection_descriptions(texts, prompt, number, enable_thinking=True, max_token=TEXT_LLM_MAX_TOKENS, temperature=0.2):
     """去重/精炼描述列表，截断到 number"""
     existing_block = "\n".join(f"- {t}" for t in texts)
     messages = [
         {"role": "system", "content": SYSTEM_PROMPT},
         {"role": "user", "content": f"Existing descriptions:\n{existing_block}\n\n{prompt}"},
     ]
-    response = _generate(messages, max_tokens=max_token, temperature=temperature, do_sample=False)
+    response = _generate(
+        messages,
+        max_tokens=max_token,
+        temperature=temperature,
+        do_sample=False,
+        enable_thinking=enable_thinking,
+    )
     _log.info(f"reflection: {len(texts)} existing → raw response {len(response)} chars")
 
     sentences = re.split(r'\n\d+[\.\)]\s*|\n-\s*|\n', response)
@@ -149,7 +196,13 @@ def reflect_one_description(text, class_name, prompt=None):
             "Make it start with 'A photo of the class {class_name}' "
             "and focus on distinctive visual features."
         )
-    user_content = prompt.format(class_name=class_name, text=text, prompt=text, number=1)
+    user_content = prompt.format(
+        class_name=class_name,
+        text=text,
+        prompt=text,
+        description=text,
+        number=1,
+    )
     messages = [
         {"role": "system", "content": SYSTEM_PROMPT},
         {"role": "user", "content": user_content},

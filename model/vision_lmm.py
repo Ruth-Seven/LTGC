@@ -58,11 +58,6 @@ def set_model_path(path):
     _model_path = path
 
 
-def preload_model():
-    """预加载 VLM 模型（在创建 DataLoader 前调用，避免 fork 后 CUDA 共享内存冲突）"""
-    _load_model()
-
-
 def _load_model():
     global _model, _processor, _model_path, _backend
     if _model is not None:

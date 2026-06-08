@@ -41,6 +41,7 @@ MAX_DESCRIBE_RETRIES = 3
 
 def _describe_with_retry(group_imgs, name, logger, vlm_prompt):
     results = [""] * len(group_imgs)
+    failed_attempts = {}  # {image_idx: [rejected_desc, ...]}
 
     for attempt in range(MAX_DESCRIBE_RETRIES):
         pending = [(i, group_imgs[i]) for i, r in enumerate(results) if not r]
@@ -58,9 +59,9 @@ def _describe_with_retry(group_imgs, name, logger, vlm_prompt):
             if not desc:
                 continue
             desc = desc.strip().strip("'\"")
-            # 只保留 "A photo of" + non-photo 检查
             if not re.match(r"^A photo of", desc, re.IGNORECASE) or _photo_check.search(desc):
                 logger.info("[VLM rejected] class=%s: %s", name, desc)
+                failed_attempts.setdefault(idx, []).append(desc)
                 continue
             logger.info("[VLM output] class=%s: %s", name, desc)
             results[idx] = desc
@@ -78,7 +79,7 @@ def _describe_with_retry(group_imgs, name, logger, vlm_prompt):
         logger.warning("Class %s: %d/%d images failed all %d attempts",
                        name, final_failed, len(group_imgs), MAX_DESCRIBE_RETRIES)
 
-    return results
+    return results, failed_attempts
 
 
 def parse_args():
@@ -182,6 +183,7 @@ def _ddp_worker(rank, world_size, args_dict):
     data_to_write = []
     examples_dir = args_dict.get('examples_dir')
     per_class = defaultdict(list) if examples_dir else None
+    per_class_fails = defaultdict(list) if examples_dir else None
     processed = 0
     tail_count = 0
 
@@ -200,18 +202,21 @@ def _ddp_worker(rank, world_size, args_dict):
 
         for (cls_id, name), indices in groups.items():
             group_imgs = [data_list[i] for i in indices]
-            descriptions = _describe_with_retry(group_imgs, name, logger,
-                                                args_dict.get('vlm_prompt'))
+            descriptions, fails = _describe_with_retry(group_imgs, name, logger,
+                                                       args_dict.get('vlm_prompt'))
 
             tail_count += len(indices)
             for i, desc in zip(indices, descriptions):
+                orig_idx = int(index[i]) if per_class is not None else None
+                img_path = dataset.img_paths[orig_idx] if per_class is not None else None
+
                 if desc:
                     data_to_write.append((cls_id, desc))
-
                     if per_class is not None:
-                        orig_idx = int(index[i])
-                        img_path = dataset.img_paths[orig_idx]
                         per_class[cls_id].append((img_path, desc))
+                elif img_path and i in fails:
+                    if per_class is not None:
+                        per_class_fails[cls_id].append((img_path, fails[i]))
 
                 if len(data_to_write) >= 10:
                     with open(part_path, 'a', newline='') as f:
@@ -239,6 +244,18 @@ def _ddp_worker(rank, world_size, args_dict):
                     f.write(f"### Image {k}\n\n")
                     f.write(f"![Image {k}]({img_rel})\n\n")
                     f.write(f"**Description:** {desc}\n\n")
+
+                # Fails section
+                fails_list = per_class_fails.get(cls_id, [])
+                if fails_list:
+                    f.write(f"\n## Fails ({len(fails_list)})\n\n")
+                    for k, (img_path, attempts) in enumerate(fails_list, 1):
+                        img_rel = f"images/{cls_id}/{os.path.basename(img_path)}"
+                        f.write(f"### Failed {k}\n\n")
+                        f.write(f"![Failed {k}]({img_rel})\n\n")
+                        for a, att in enumerate(attempts, 1):
+                            f.write(f"- Attempt {a}: {att}\n")
+                        f.write("\n")
         logger.info("DDP rank %d wrote .part md for %d classes", rank, len(per_class))
 
     logger.info("DDP rank %d done. Processed: %d, Tail: %d", rank, processed, tail_count)
@@ -310,6 +327,7 @@ def _main_single_gpu(args, logger):
     tail_count = 0
     examples_dir = args.examples_dir
     per_class = defaultdict(list) if examples_dir else None
+    per_class_fails = defaultdict(list) if examples_dir else None
 
     logger.info("Starting image description generation for tail classes...")
 
@@ -325,18 +343,21 @@ def _main_single_gpu(args, logger):
 
         for (cls_id, name), indices in groups.items():
             group_imgs = [data_list[i] for i in indices]
-            descriptions = _describe_with_retry(group_imgs, name, logger,
-                                                args.vlm_prompt)
+            descriptions, fails = _describe_with_retry(group_imgs, name, logger,
+                                                       args.vlm_prompt)
 
             tail_count += len(indices)
             for i, desc in zip(indices, descriptions):
+                orig_idx = int(index[i]) if per_class is not None else None
+                img_path = dataset.img_paths[orig_idx] if per_class is not None else None
+
                 if desc:
                     data_to_write.append((cls_id, desc))
-
                     if per_class is not None:
-                        orig_idx = int(index[i])
-                        img_path = dataset.img_paths[orig_idx]
                         per_class[cls_id].append((img_path, desc))
+                elif img_path and i in fails:
+                    if per_class is not None:
+                        per_class_fails[cls_id].append((img_path, fails[i]))
 
                 if len(data_to_write) >= 10:
                     with open(tmp_file, 'a', newline='') as f:
@@ -352,7 +373,7 @@ def _main_single_gpu(args, logger):
             csv.writer(f).writerows(data_to_write)
 
     if per_class:
-        _save_single_gpu_examples(per_class, examples_dir, logger)
+        _save_single_gpu_examples(per_class, per_class_fails, examples_dir, logger)
 
     os.rename(tmp_file, description_file)
     logger.info("Single-GPU done. Processed: %d, Tail: %d, Output: %s", processed, tail_count, description_file)
@@ -404,7 +425,7 @@ def _concat_class_examples(examples_dir, logger):
     logger.info("Examples saved to %s (%d classes)", examples_dir, len(class_parts))
 
 
-def _save_single_gpu_examples(per_class, examples_dir, logger):
+def _save_single_gpu_examples(per_class, per_class_fails, examples_dir, logger):
     """单 GPU 模式：直接写 examples_dir/{cls_id}.md"""
     if not per_class or not examples_dir:
         return
@@ -421,6 +442,17 @@ def _save_single_gpu_examples(per_class, examples_dir, logger):
                 f.write(f"### Image {k}\n\n")
                 f.write(f"![Image {k}]({img_rel})\n\n")
                 f.write(f"**Description:** {desc}\n\n")
+
+            fails_list = per_class_fails.get(cls_id, []) if per_class_fails else []
+            if fails_list:
+                f.write(f"\n## Fails ({len(fails_list)})\n\n")
+                for k, (img_path, attempts) in enumerate(fails_list, 1):
+                    img_rel = f"images/{cls_id}/{os.path.basename(img_path)}"
+                    f.write(f"### Failed {k}\n\n")
+                    f.write(f"![Failed {k}]({img_rel})\n\n")
+                    for a, att in enumerate(attempts, 1):
+                        f.write(f"- Attempt {a}: {att}\n")
+                    f.write("\n")
     logger.info("Examples saved to %s (%d classes)", examples_dir, len(per_class))
 
 

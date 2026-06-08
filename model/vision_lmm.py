@@ -8,7 +8,7 @@ import logging
 from transformers import AutoProcessor
 from PIL import Image
 
-from config import LOCAL_VLM_ID, VLM_MAX_TOKENS, LLAVA_MODEL_ID, QWEN2VL_MODEL_ID
+from config import LOCAL_VLM_ID, VLM_MAX_TOKENS, LLAVA_MODEL_ID, QWEN2VL_MODEL_ID, VLM_TEMPERATURE, VLM_TOP_P
 
 _log = logging.getLogger("vision_lmm")
 
@@ -184,7 +184,9 @@ def describe_image_batch(image_tensors, text_prompts, max_retries=2):
                 output = model.generate(
                     **inputs,
                     max_new_tokens=VLM_MAX_TOKENS,
-                    do_sample=False,
+                    do_sample=True,
+                    temperature=VLM_TEMPERATURE,
+                    top_p=VLM_TOP_P,
                 )
 
             responses = [

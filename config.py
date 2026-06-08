@@ -57,6 +57,8 @@ LLAVA_MODEL_ID = "/data/model/llava-hf_llava-1.5-7b-hf"
 QWEN2VL_MODEL_ID = "/data/model/Qwen2-VL-7B-Instruct"
 LOCAL_VLM_ID = QWEN2VL_MODEL_ID
 VLM_MAX_TOKENS = 200
+VLM_TEMPERATURE = 0.7
+VLM_TOP_P = 0.9
 
 # ============================================================
 # Text LLM (描述扩展) 配置

@@ -127,7 +127,7 @@ def _worker(rank, world_size, class_chunks, args, examples_dir):
                     else:
                         logger.info("Score %.4f < %s", clip_score, args.thresh)
                         if attempt < args.max_rounds - 1:
-                            refined = refine_description(text, class_name)
+                            refined = refine_description(text, class_name, prompt=args.refine_prompt)
                             if refined:
                                 logger.info("Refined: %s", refined)
                                 text = refined
@@ -241,7 +241,8 @@ def _detect_gpus():
 def main():
     from utils import load_prompts
     args = parse_args()
-    load_prompts(args.prompt_file)  # 验证 prompt 文件，generate 阶段暂无覆盖项
+    prompts = load_prompts(args.prompt_file)
+    args.refine_prompt = prompts.get("extend", {}).get("refine_prompt")
 
     if args.num_gpus == 0:
         num_gpus = _detect_gpus()

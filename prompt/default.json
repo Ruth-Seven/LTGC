@@ -5,6 +5,8 @@
     "extend": {
         "extension_prompt": "Besides these descriptions mentioned above, please use the Template 1 to list exactly {number} other possible [distinctive features] and [specific scenes].\nTemplate1: A photo of the class {class_name}, [with distinctive features] in [specific scenes]. \nList the selected sentences numbered from 1 to {number}, one per line. Do not output more than {number} descriptions.",
         "reflection_prompt": "From the provided description list, please select exactly {number} unique sentences for the class '{class_name}'. \nEach sentence must describe a different [distinctive feature] (e.g., texture, shape) or a [specific scene] (e.g., lighting, environment) to ensure diversity. Avoid near-duplicates.\nList the selected sentences numbered from 1 to {number}, one per line. Do not output more than {number} descriptions.",
+        "refine_prompt": "Refine this description to better describe a {class_name}:\n'{text}'\n\nMake it start with 'A photo of the class {class_name}' and focus on distinctive visual features.",
+        "template_prompt": "Describe the class '{class_name}' using this format:\n'A photo of the class {class_name}, with [features], in [setting].'",
         "system_prompt": "You are a helpful assistant that generates diverse and detailed image descriptions for image classification datasets."
     },
     "generate": {}

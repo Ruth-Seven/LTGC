@@ -132,19 +132,25 @@ def reflection_descriptions(texts, prompt, number, max_token=TEXT_LLM_MAX_TOKENS
     return result[:number]
 
 
-def refine_description(text, class_name):
-    """润色描述"""
+def refine_description(text, class_name, prompt=None):
+    """润色描述
+
+    Args:
+        text: 待润色的描述文本
+        class_name: 类别名称
+        prompt: 自定义 prompt，支持 {class_name} 和 {text} 占位符。为 None 时使用内置默认
+    """
+    if prompt is None:
+        prompt = (
+            "Refine this description to better describe a {class_name}:\n"
+            "'{text}'\n\n"
+            "Make it start with 'A photo of the class {class_name}' "
+            "and focus on distinctive visual features."
+        )
+    user_content = prompt.format(class_name=class_name, text=text)
     messages = [
         {"role": "system", "content": SYSTEM_PROMPT},
-        {
-            "role": "user",
-            "content": (
-                f"Refine this description to better describe a {class_name}:\n"
-                f"'{text}'\n\n"
-                f"Make it start with 'A photo of the class {class_name}' "
-                f"and focus on distinctive visual features."
-            ),
-        },
+        {"role": "user", "content": user_content},
     ]
     response = _generate(messages, max_tokens=80, do_sample=False)
     if response.startswith('A photo'):
@@ -152,17 +158,22 @@ def refine_description(text, class_name):
     return response
 
 
-def generate_template(class_name):
-    """生成类别模板描述"""
+def generate_template(class_name, prompt=None):
+    """生成类别模板描述
+
+    Args:
+        class_name: 类别名称
+        prompt: 自定义 prompt，支持 {class_name} 占位符。为 None 时使用内置默认
+    """
+    if prompt is None:
+        prompt = (
+            "Describe the class '{class_name}' using this format:\n"
+            "'A photo of the class {class_name}, with [features], in [setting].'"
+        )
+    user_content = prompt.format(class_name=class_name)
     messages = [
         {"role": "system", "content": SYSTEM_PROMPT},
-        {
-            "role": "user",
-            "content": (
-                f"Describe the class '{class_name}' using this format:\n"
-                f"'A photo of the class {class_name}, with [features], in [setting].'"
-            ),
-        },
+        {"role": "user", "content": user_content},
     ]
     response = _generate(messages, max_tokens=50, do_sample=False)
     response = response.strip()

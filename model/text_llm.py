@@ -5,8 +5,6 @@
 import torch
 import re
 import logging
-import requests
-import json
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from config import (
@@ -104,6 +102,9 @@ def extend_descriptions(existing_texts, prompt, number, max_token=TEXT_LLM_MAX_T
                 result.append(s)
     result = list(dict.fromkeys(result))
     _log.info(f"extend: parsed {len(result)} descriptions, returning {min(len(result), number)}")
+    if not result: 
+        _log.warning("extend: no valid descriptions generated, returning empty list\n Original response was:\n" + response + "\n\n")
+        return []
     return result[:number]
 
 
@@ -127,6 +128,9 @@ def reflection_descriptions(texts, prompt, number, max_token=TEXT_LLM_MAX_TOKENS
             result.append(s)
     result = list(dict.fromkeys(result))
     _log.info(f"reflection: parsed {len(result)} descriptions, returning {min(len(result), number)}")
+    if not result: 
+        _log.warning("reflection: no valid descriptions generated, returning empty list\n Original response was:\n" + response + "\n\n")
+        return []
     return result[:number]
 
 
@@ -153,6 +157,9 @@ def reflect_one_description(text, class_name, prompt=None):
     response = _generate(messages, max_tokens=80, do_sample=False)
     if response.startswith('A photo'):
         response = response.split('\n')[0].strip()
+    if not response:
+        _log.warning("reflection-one: no valid descriptions generated, returning empty list\n Original response was:\n" + response + "\n\n")
+        return ""
     return response
 
 

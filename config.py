@@ -1,6 +1,6 @@
 """
 集中配置模块
-管理 DeepSeek API、本地 VLM (LLaVA)、Stable Diffusion 等所有配置项
+管理本地 VLM (LLaVA/Qwen2-VL)、Stable Diffusion 等所有配置项
 """
 import os
 
@@ -68,13 +68,6 @@ VLM_TOP_P = 0.9
 TEXT_LLM_MODEL_ID = "Qwen/Qwen3-8B"
 TEXT_LLM_MAX_TOKENS = 10000
 TEXT_LLM_TEMPERATURE = 0.8
-# api llm 配置
-DEEPSEEK_API_KEY = os.environ.get("DEEPSEEK_API_KEY", "Replace with your DeepSeek API Key")
-DEEPSEEK_API_ENDPOINT = "https://api.deepseek.com/chat/completions"
-DEEPSEEK_VISION_MODEL = "deepseek-chat"
-DEEPSEEK_CHAT_MODEL = "deepseek-chat"
-DEEPSEEK_MAX_TOKENS = 300
-DEEPSEEK_TEMPERATURE = 0.7
 
 # ============================================================
 # CLIP 配置
@@ -110,20 +103,3 @@ CLASS_COUNT_FILE = os.path.join(DATA_DIR, "imagenetlt_class_count.json")
 
 os.makedirs(DESCRIPTIONS_DIR, exist_ok=True)
 os.makedirs(GEN_TRAIN_DIR, exist_ok=True)
-
-
-def get_deepseek_headers():
-    """获取 DeepSeek API 请求头"""
-    return {
-        "Content-Type": "application/json",
-        "Authorization": f"Bearer {DEEPSEEK_API_KEY}"
-    }
-
-
-def get_deepseek_payload(messages, model=None, max_tokens=None):
-    """构建 DeepSeek API 请求体"""
-    return {
-        "model": model or DEEPSEEK_CHAT_MODEL,
-        "messages": messages,
-        "max_tokens": max_tokens or DEEPSEEK_MAX_TOKENS,
-    }

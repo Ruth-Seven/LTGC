@@ -71,7 +71,10 @@ def _extend_worker(rank, world_size, class_chunks, max_generate_num,
     for idx, (label, texts) in enumerate(class_list):
         class_name = _get_class_name(label, class_map)
         n_existing = len(texts)
-        logger.info("Class %s %s (%d/%d): %d existing", label, class_name, idx + 1, total, n_existing)
+        logger.info(
+            "[class %s %s] %d/%d start: existing=%d target=%d",
+            label, class_name, idx + 1, total, n_existing, max_generate_num,
+        )
 
         # 每条 existing desc 扩展 N 倍
         per_text = max(1, -(-max_generate_num // n_existing)) if n_existing > 0 else max_generate_num
@@ -84,29 +87,48 @@ def _extend_worker(rank, world_size, class_chunks, max_generate_num,
                 number=per_text,
                 max_token=200 * per_text,
             )
-            logger.info("Class %s %s [%d/%d]: generated %d raw", label, class_name, ti + 1, n_existing, len(raw))
-
             # 质量过滤
-            fresh = list(dict.fromkeys(raw))
-            fresh = [d for d in fresh if validate_description(d, class_name)]
-            logger.info("Class %s %s [%d/%d]: after filter %d", label, class_name, ti + 1, n_existing, len(fresh))
+            unique_raw = list(dict.fromkeys(raw))
+            fresh = [d for d in unique_raw if validate_description(d, class_name)]
 
-            if not fresh:
-                continue
+            reflected = []
+            if fresh:
+                # 每条扩展完立即 reflect
+                reflected = reflection_descriptions(
+                    fresh,
+                    prompt=ref_prompt.format(number=per_text, class_name=class_name),
+                    number=per_text,
+                )
 
-            # 每条扩展完立即 reflect
-            reflected = reflection_descriptions(
-                fresh,
-                prompt=ref_prompt.format(number=per_text, class_name=class_name),
-                number=per_text,
+            logger.info("")
+            logger.info(
+                "[class %s %s] desc %d/%d summary: raw=%d unique=%d fresh=%d reflected=%d",
+                label, class_name, ti + 1, n_existing,
+                len(raw), len(unique_raw), len(fresh), len(reflected),
             )
-            logger.info("Class %s %s [%d/%d]: after reflection %d", label, class_name, ti + 1, n_existing, len(reflected))
-            for desc in reflected:
-                logger.info("  - %s", desc)
+            for desc_idx, desc in enumerate(raw, 1):
+                logger.info(
+                    "[class %s %s] desc %d/%d raw %d. %s",
+                    label, class_name, ti + 1, n_existing, desc_idx, desc,
+                )
+            for desc_idx, desc in enumerate(fresh, 1):
+                logger.info(
+                    "[class %s %s] desc %d/%d fresh %d. %s",
+                    label, class_name, ti + 1, n_existing, desc_idx, desc,
+                )
+            for desc_idx, desc in enumerate(reflected, 1):
+                logger.info(
+                    "[class %s %s] desc %d/%d reflected %d. %s",
+                    label, class_name, ti + 1, n_existing, desc_idx, desc,
+                )
             all_new.extend(reflected)
 
         all_new = list(dict.fromkeys(all_new))  # 全局去重
-        logger.info("Class %s %s: total after dedup %d descriptions", label, class_name, len(all_new))
+        logger.info("")
+        logger.info(
+            "[class %s %s] done: output=%d after class-level dedup",
+            label, class_name, len(all_new),
+        )
         for desc in all_new:
             data_to_write.append((label, desc))
 

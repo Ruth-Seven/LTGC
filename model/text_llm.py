@@ -93,7 +93,6 @@ def extend_descriptions(existing_texts, prompt, number, max_token=TEXT_LLM_MAX_T
         {"role": "user", "content": f"Existing descriptions:\n{existing_block}\n\n{prompt}"},
     ]
     response = _generate(messages, max_tokens=max_token, temperature=temperature)
-    _log.info(f"extend: {len(existing_texts)} existing → raw response {len(response)} chars")
 
     sentences = re.split(r'\n\d+[\.\)]\s*|\n-\s*|\n', response)
     result = []

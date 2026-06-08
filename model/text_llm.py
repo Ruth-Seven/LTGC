@@ -82,6 +82,13 @@ def _generate_local(messages, max_tokens, temperature, do_sample, top_p,
     return response.strip()
 
 
+# ── Response 清理 ────────────────────────────────────────────────
+
+def _strip_thinking(response: str) -> str:
+    """移除 Qwen3 thinking 模式的 <think>...</think> 推理块"""
+    return re.sub(r"<think>.*?</think>", "", response, flags=re.DOTALL).strip()
+
+
 # ── Dispatch ───────────────────────────────────────────────────
 
 def _generate(messages, max_tokens=TEXT_LLM_MAX_TOKENS,
@@ -125,7 +132,7 @@ def extend_descriptions(existing_texts, prompt, number, enable_thinking=False, m
     return result[:number]
 
 
-def determine_descriptions(existing_texts, prompt, enable_thinking=False, max_token=TEXT_LLM_MAX_TOKENS, temperature=TEXT_LLM_TEMPERATURE):
+def determine_descriptions(existing_texts, prompt, enable_thinking=False, max_token=TEXT_LLM_MAX_TOKENS, temperature=0.2, do_sample=False):
     """返回需要 reflection 的 1-based description 序号。"""
     existing_block = ""
     for idx, text in enumerate(existing_texts):
@@ -138,6 +145,7 @@ def determine_descriptions(existing_texts, prompt, enable_thinking=False, max_to
         messages,
         max_tokens=max_token,
         temperature=temperature,
+        do_sample=do_sample,
         enable_thinking=enable_thinking,
     )
 
@@ -150,7 +158,7 @@ def determine_descriptions(existing_texts, prompt, enable_thinking=False, max_to
 
     return result
 
-def reflection_descriptions(texts, prompt, number, enable_thinking=True, max_token=TEXT_LLM_MAX_TOKENS, temperature=0.2):
+def reflection_descriptions(texts, prompt, number, enable_thinking=True, max_token=TEXT_LLM_MAX_TOKENS, temperature=0.2, do_sample=False):
     """去重/精炼描述列表，截断到 number"""
     existing_block = "\n".join(f"- {t}" for t in texts)
     messages = [
@@ -161,7 +169,7 @@ def reflection_descriptions(texts, prompt, number, enable_thinking=True, max_tok
         messages,
         max_tokens=max_token,
         temperature=temperature,
-        do_sample=False,
+        do_sample=do_sample,
         enable_thinking=enable_thinking,
     )
     _log.info(f"reflection: {len(texts)} existing → raw response {len(response)} chars")
@@ -181,39 +189,41 @@ def reflection_descriptions(texts, prompt, number, enable_thinking=True, max_tok
     return result[:number]
 
 
-def reflect_one_description(text, class_name, prompt=None):
+def reflect_one_description(description, class_name, prompt, enable_thinking=True, do_sample=False, temperature=0.2, max_token=1000):
     """润色描述
 
     Args:
-        text: 待润色的描述文本
+        description: 待润色的描述文本
         class_name: 类别名称
-        prompt: 自定义 prompt，支持 {class_name} 和 {text} 占位符。为 None 时使用内置默认
+        prompt: 自定义 prompt，支持 {class_name} 占位符
     """
     if prompt is None:
-        prompt = (
-            "Refine this description to better describe a {class_name}:\n"
-            "'{text}'\n\n"
-            "Make it start with 'A photo of the class {class_name}' "
-            "and focus on distinctive visual features."
-        )
-    user_content = prompt.format(
+        raise Exception("reflect_one_description Empty.")
+    user_content = description + "\n" + prompt.format(
         class_name=class_name,
-        text=text,
-        prompt=text,
-        description=text,
-        number=1,
     )
     messages = [
         {"role": "system", "content": SYSTEM_PROMPT},
         {"role": "user", "content": user_content},
     ]
-    response = _generate(messages, max_tokens=80, do_sample=False)
-    if response.startswith('A photo'):
-        response = response.split('\n')[0].strip()
-    if not response:
-        _log.warning("reflection-one: no valid descriptions generated, returning empty list\n Original response was:\n" + response + "\n\n")
+    response = _generate(
+        messages,
+        max_tokens=max_token,
+        temperature=temperature,
+        do_sample=do_sample,
+        enable_thinking=enable_thinking,
+    )
+    removed_thinking = _strip_thinking(response)
+    # 提取第一条 "A photo of..." 描述
+    m = re.search(r"A photo of.*", removed_thinking)
+    if m:
+        result = m.group(0).split('\n')[0].strip()
+    else:
+        result = ""
+    if not result:
+        _log.warning("reflection-one: no valid descriptions generated, returning empty string\n")
         return ""
-    return response
+    return result
 
 
 def generate_template(class_name, prompt=None):

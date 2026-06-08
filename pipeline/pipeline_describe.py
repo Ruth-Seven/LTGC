@@ -56,6 +56,9 @@ def _describe_with_retry(group_imgs, name, logger, vlm_prompt):
         for idx, desc in zip(p_indices, batch_results):
             if desc and validate_description(desc, name):
                 results[idx] = desc
+                logger.info("[VLM output] class=%s: %s", name, desc)
+            elif desc:
+                logger.info("[VLM rejected] class=%s: %s", name, desc)
 
         still_failed = sum(1 for r in results if not r)
         if still_failed == 0:

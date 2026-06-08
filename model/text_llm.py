@@ -90,6 +90,7 @@ def extend_descriptions(existing_texts, prompt, number, max_token=TEXT_LLM_MAX_T
         {"role": "user", "content": f"Existing descriptions:\n{existing_block}\n\n{prompt}"},
     ]
     response = _generate(messages, max_tokens=max_token, temperature=temperature)
+    print(f"[text_llm] extend: {len(existing_texts)} existing → raw response {len(response)} chars")
 
     sentences = re.split(r'\n\d+[\.\)]\s*|\n-\s*|\n', response)
     result = []
@@ -100,6 +101,7 @@ def extend_descriptions(existing_texts, prompt, number, max_token=TEXT_LLM_MAX_T
             if s and s.count('[') == 0 and s.count(']') == 0:
                 result.append(s)
     result = list(dict.fromkeys(result))
+    print(f"[text_llm] extend: parsed {len(result)} descriptions, returning {min(len(result), number)}")
     return result[:number]
 
 
@@ -112,6 +114,8 @@ def reflection_descriptions(texts, prompt, number, max_token=TEXT_LLM_MAX_TOKENS
         {"role": "user", "content": f"Existing descriptions:\n{existing_block}\n\n{prompt}"},
     ]
     response = _generate(messages, max_tokens=max_token, temperature=temperature, do_sample=False)
+    print(f"[text_llm] reflection: {len(texts)} existing → raw response {len(response)} chars")
+
     sentences = re.split(r'\n\d+[\.\)]\s*|\n-\s*|\n', response)
     result = []
     for s in sentences:
@@ -121,6 +125,7 @@ def reflection_descriptions(texts, prompt, number, max_token=TEXT_LLM_MAX_TOKENS
             if s and s.count('[') == 0 and s.count(']') == 0:
                 result.append(s)
     result = list(dict.fromkeys(result))
+    print(f"[text_llm] reflection: parsed {len(result)} descriptions, returning {min(len(result), number)}")
     return result[:number]
 
 

@@ -56,7 +56,7 @@ def validate_description(description, class_name):
     if _photo_check.search(desc):
         return False
 
-    if f"class {class_name}" not in desc.lower():
+    if f"class {class_name}".lower() not in desc.lower():
         return False
 
     return True

@@ -178,7 +178,7 @@ def describe_image_batch(image_tensors, text_prompts, max_retries=2):
 
             inputs = {k: v.to(model.device) for k, v in inputs.items()}
 
-            input_lengths = inputs["attention_mask"].sum(dim=1)
+            prompt_len = inputs["input_ids"].shape[1]
 
             with torch.no_grad():
                 output = model.generate(
@@ -189,11 +189,13 @@ def describe_image_batch(image_tensors, text_prompts, max_retries=2):
                     top_p=VLM_TOP_P,
                 )
 
-            responses = [
-                processor.decode(output[i][input_lengths[i]:], skip_special_tokens=True).strip()
-                for i in range(B)
-            ]
-            return responses
+            generated_ids = output[:, prompt_len:]
+            responses = processor.batch_decode(
+                generated_ids,
+                skip_special_tokens=True,
+                clean_up_tokenization_spaces=False,
+            )
+            return [r.strip() for r in responses]
 
         except torch.cuda.OutOfMemoryError:
             _log.warning(f"CUDA OOM batch (attempt {attempt + 1}/{max_retries})")

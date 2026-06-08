@@ -132,6 +132,13 @@ def setup_logger(name, log_path):
     return logger
 
 
+def _loader_kwargs(num_workers):
+    kwargs = {"num_workers": num_workers, "pin_memory": False}
+    if num_workers > 0:
+        kwargs["multiprocessing_context"] = mp.get_context('spawn')
+    return kwargs
+
+
 def _ddp_worker(rank, world_size, args_dict):
     """DDP worker rank/GPU N: DistributedSampler 自动按 rank 分片数据"""
     os.environ['CUDA_VISIBLE_DEVICES'] = str(rank)
@@ -166,11 +173,11 @@ def _ddp_worker(rank, world_size, args_dict):
         dataset, num_replicas=world_size, rank=rank, shuffle=False, drop_last=False
     )
     batch_size = args_dict.get('batch_size', 6)
+    num_workers = 0 if args_dict.get('test', False) else args_dict.get('num_workers', 4)
     loader = DataLoader(
         dataset, sampler=sampler, batch_size=batch_size,
-        num_workers=args_dict.get('num_workers', 4), pin_memory=False,
         collate_fn=collate_no_stack,
-        multiprocessing_context=mp.get_context('spawn'),
+        **_loader_kwargs(num_workers),
     )
 
     with open(args_dict['class_number_file'], 'r') as f:
@@ -303,17 +310,18 @@ def _main_single_gpu(args, logger):
     tmp_file = description_file + ".tmp"
     if os.path.exists(tmp_file):
         os.remove(tmp_file)
+    open(tmp_file, 'w').close()
 
     logger.info("Dataloading (single-GPU, batch_size=%d)...", args.batch_size)
     transform = transforms.Compose([
         transforms.ToTensor(),
     ])
     dataset = ImageNetLTDataset(args.data_dir, split='train', transform=transform)
+    num_workers = 0 if args.test else args.num_workers
     loader = DataLoader(
         dataset, batch_size=args.batch_size, shuffle=False,
-        num_workers=args.num_workers, pin_memory=False,
         collate_fn=collate_no_stack,
-        multiprocessing_context=mp.get_context('spawn'),
+        **_loader_kwargs(num_workers),
     )
 
     if not os.path.exists(args.class_number_file):
@@ -375,6 +383,8 @@ def _main_single_gpu(args, logger):
     if per_class:
         _save_single_gpu_examples(per_class, per_class_fails, examples_dir, logger)
 
+    del loader
+    del dataset
     os.rename(tmp_file, description_file)
     logger.info("Single-GPU done. Processed: %d, Tail: %d, Output: %s", processed, tail_count, description_file)
 

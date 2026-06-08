@@ -8,6 +8,7 @@ import sys
 import shutil
 import argparse
 import logging
+from typing import Optional, Any
 import pandas as pd
 from collections import defaultdict
 import torch.multiprocessing as mp
@@ -18,7 +19,7 @@ from config import DATA_DIR, EXTENDED_DESCRIPTION_PATH
 from utils import validate_description
 
 
-def parse_args():
+def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description='LTGC Step 3: Text -> Image')
     parser.add_argument('-ext', '--extended_description_path',
                         default=EXTENDED_DESCRIPTION_PATH,
@@ -43,7 +44,7 @@ def parse_args():
     return parser.parse_args()
 
 
-def setup_logger(name, log_path):
+def setup_logger(name: str, log_path: str) -> logging.Logger:
     logger = logging.getLogger(name)
     logger.setLevel(logging.INFO)
     fh = logging.FileHandler(log_path)
@@ -54,7 +55,7 @@ def setup_logger(name, log_path):
     return logger
 
 
-def save_generation_markdown(records, output_dir):
+def save_generation_markdown(records: list[tuple[str, str, str, float]], output_dir: str) -> None:
     os.makedirs(output_dir, exist_ok=True)
     md_path = os.path.join(output_dir, "generation_examples.md")
     with open(md_path, "w", encoding="utf-8") as f:
@@ -72,87 +73,97 @@ def save_generation_markdown(records, output_dir):
     print(f"[save_generation_markdown] Examples saved to {md_path}")
 
 
-def _worker(rank, world_size, class_chunks, args, examples_dir):
+def _worker(
+    rank: int,
+    world_size: int,
+    class_chunks: list[list[tuple[int, list[str]]]],
+    args: argparse.Namespace,
+    examples_dir: Optional[str],
+) -> None:
+    """单 GPU worker：SD 生成 → CLIP 筛选 → 低分 refine 重试"""
+    # ── 进程隔离：每 worker 绑定一张 GPU（通过 CUDA_VISIBLE_DEVICES）──
     os.environ["CUDA_VISIBLE_DEVICES"] = str(rank)
 
     os.makedirs(args.log_dir, exist_ok=True)
     log_path = os.path.join(args.log_dir, f"generate_gpu_{rank}.log")
     logger = setup_logger(f"GPU{rank}", log_path)
 
+    # ── 延迟导入：在 CUDA_VISIBLE_DEVICES 设置后再加载模型模块 ──
     from config import GENERATION_EXAMPLE_DIR
     from model.clip_score import score, score_batch
     from model.image_gen import generate, generate_batch, unload_sd
     from model.text_llm import reflect_one_description, _unload_model as unload_text_llm
     from data_txt.imagenet_label_mapping import get_readable_name as _imagenet_class_name
 
+    # ── 类别名映射（支持自定义 JSON mapping）──
     _class_map = None
     if args.class_mapping and os.path.exists(args.class_mapping):
         import json
         with open(args.class_mapping) as f:
             _class_map = json.load(f)
 
-    def _class_name(label):
+    def _class_name(label: int) -> str:
         if _class_map is not None:
             return str(_class_map.get(str(label), label))
         return _imagenet_class_name(int(label)).split(", ")[0]
 
-    # resolve examples_dir: prefer --examples-dir, fallback to --md for backward compat
     examples_dir = examples_dir or args.md
 
     gen_records = defaultdict(list) if examples_dir else None
     class_list = class_chunks[rank]
     total = len(class_list)
 
+    # ════════════════════════════════════════════════════════════════
+    # 主循环：逐类处理
+    # ════════════════════════════════════════════════════════════════
     for label_idx, (label, texts) in enumerate(class_list):
         class_name = _class_name(label)
         dir_path = os.path.join(args.data_dir, str(label))
         os.makedirs(dir_path, exist_ok=True)
+
+        # ── 准备描述列表和 CLIP 目标 prompt ──
         generation_prompts = [
-            str(t).strip() if not pd.isna(t) and str(t).strip()
-            else f'A photo of a {class_name}'
-            for t in texts
+            str(t).strip() if not pd.isna(t) and str(t).strip() else f'A photo of a {class_name}' for t in texts
         ]
         clip_prompt = f'A photo of a {class_name}'
-        logger.info(
-            "Class %s (%d/%d), %d descriptions",
-            label, label_idx + 1, total, len(generation_prompts),
-        )
+        n = len(generation_prompts)
+        logger.info("[class %s %s] %d descs, thresh=%.2f, max_rounds=%d",
+                    label, class_name, n, args.thresh, args.max_rounds)
 
+        # ── 单图模式：逐张生成 + 单张 CLIP 评分（不走批量流水线）──
         if args.onepath:
             for text_i, generation_prompt in enumerate(generation_prompts):
                 saved_path = os.path.join(args.data_dir, 'gen_train-onepath.JPEG')
-                accepted = False
+                desc_accepted = False
                 for attempt in range(args.max_rounds):
                     img_path = generate(generation_prompt, saved_path)
                     if img_path is None:
                         continue
-                    clip_score = score(img_path, clip_prompt)
-                    logger.info("Class %s (%d/%d): Attempt %d/%d, Score: %.4f Class: %s",
-                                label, label_idx + 1, total, attempt + 1, args.max_rounds, clip_score, class_name)
-                    if clip_score >= args.thresh:
-                        logger.info("accepted")
+                    s = score(img_path, clip_prompt)
+                    if s >= args.thresh:
                         if examples_dir:
-                            gen_records[label].append((generation_prompt, clip_score, img_path))
-                        accepted = True
+                            gen_records[label].append((generation_prompt, s, img_path))
+                        desc_accepted = True
+                        logger.info("[class %s %s] desc %d/%d accepted in round %d (%.4f)",
+                                    label, class_name, text_i + 1, n, attempt + 1, s)
                         break
-                    else:
-                        logger.info("Score %.4f < %s", clip_score, args.thresh)
-                        if attempt < args.max_rounds - 1:
-                            refined = reflect_one_description(
-                                generation_prompt, class_name,
-                                prompt=args.reflect_one_prompt,
-                            )
-                            if refined and validate_description(refined, class_name):
-                                logger.info("Refined: %s", refined)
-                                generation_prompt = refined
-                            elif refined:
-                                logger.info("Refined rejected: %s", refined)
+                    if attempt < args.max_rounds - 1:
+                        refined = reflect_one_description(
+                            generation_prompt, class_name,
+                            prompt=args.reflect_one_prompt,
+                        )
+                        if refined and validate_description(refined, class_name):
+                            generation_prompt = refined
+                        elif refined:
+                            logger.info("[class %s %s] desc %d/%d refine rejected",
+                                        label, class_name, text_i + 1, n)
                 unload_text_llm()
-                if not accepted:
-                    logger.info("All attempts failed, skip")
+                if not desc_accepted:
+                    logger.info("[class %s %s] desc %d/%d failed after %d rounds",
+                                label, class_name, text_i + 1, n, args.max_rounds)
             continue
 
-        n = len(generation_prompts)
+        # ── 批量模式：按 batch 分块，每块内 SD 批量生成 → CLIP 批量评分 → 低分 refine 重试 ──
         save_paths = [os.path.join(dir_path, f"{label}_{i}.JPEG") for i in range(n)]
         accepted = [False] * n
         bs = args.batch
@@ -160,13 +171,14 @@ def _worker(rank, world_size, class_chunks, args, examples_dir):
         for chunk_start in range(0, n, bs):
             chunk_end = min(chunk_start + bs, n)
             chunk_ids = list(range(chunk_start, chunk_end))
-            logger.info(" Batch chunk [%d:%d]", chunk_start, chunk_end)
 
             for attempt in range(args.max_rounds):
+                # 只处理本轮仍未接受的描述
                 pending = [i for i in chunk_ids if not accepted[i]]
                 if not pending:
                     break
 
+                # Step A: SD 批量生成图像
                 batch_prompts = [generation_prompts[i] for i in pending]
                 batch_paths = [save_paths[i] for i in pending]
                 img_paths = generate_batch(batch_prompts, batch_paths)
@@ -176,44 +188,58 @@ def _worker(rank, world_size, class_chunks, args, examples_dir):
                 if not valid:
                     break
 
+                # Step B: CLIP 批量评分
                 v_idx, v_paths = zip(*valid)
                 clip_scores = score_batch(
                     list(v_paths), [clip_prompt] * len(v_paths)
                 )
 
+                # Step C: 按阈值分流 accepted / rejected
+                n_acc = 0
+                n_rej = 0
                 for idx, s in zip(v_idx, clip_scores):
-                    logger.info("Class %s (%d/%d): Attempt %d/%d, Score: %.4f Class: %s",
-                                label, label_idx + 1, total, attempt + 1, args.max_rounds, s, class_name)
                     if s >= args.thresh:
-                        logger.info("accepted")
                         if examples_dir:
                             gen_records[label].append((generation_prompts[idx], s, save_paths[idx]))
                         accepted[idx] = True
+                        n_acc += 1
                     else:
-                        logger.info("Score %.4f < %s", s, args.thresh)
+                        n_rej += 1
+                        logger.warning("[class %s %s] desc %d/%d rejected: %s",
+                                    label, class_name, idx + 1, n, batch_prompts[idx])
+                logger.info("[class %s %s] round %d/%d: accepted=%d rejected=%d",
+                            label, class_name, attempt + 1, args.max_rounds, n_acc, n_rej)
 
+                # Step D: 低分描述 refine（调用 text_llm 润色后下一轮重试）
                 if attempt < args.max_rounds - 1:
+                    n_refined = 0
                     for i in chunk_ids:
                         if not accepted[i]:
                             refined = reflect_one_description(
                                 generation_prompts[i], class_name,
                                 prompt=args.reflect_one_prompt,
-                            )
+                                enable_thinking=True, do_sample=False, 
+                                temperature=0.2, max_token=1000)
+                            if not refined:
+                                logger.warn("[class %s %s] round %d/%d: refined an empty description")
                             if refined and validate_description(refined, class_name):
-                                logger.info("Refined: %s", refined)
                                 generation_prompts[i] = refined
-                            elif refined:
-                                logger.info("Refined rejected: %s", refined)
+                                n_refined += 1
+                                logger.info("[class %s %s] round %d/%d: refined: %s",
+                                    label, class_name, attempt + 1, args.max_rounds, refined)
+                            else:
+                                logger.warn("[class %s %s] round %d/%d: fail to validate refined dst: %s",
+                                    label, class_name, attempt + 1, args.max_rounds, refined)
                     unload_text_llm()
-
+                        
                 if all(accepted[i] for i in chunk_ids):
                     break
 
         failed = sum(1 for a in accepted if not a)
-        if failed:
-            logger.info("%d/%d failed", failed, n)
+        logger.info("[class %s %s] done: %d/%d accepted, %d failed",
+                    label, class_name, n - failed, n, failed)
 
-        # 按 class 写入 Generated Images 段落
+        # ── 写入 Markdown：追加 Generated Images 段落 ──
         if examples_dir and gen_records.get(label):
             os.makedirs(examples_dir, exist_ok=True)
             safe_name = class_name.replace(' ', '_').replace('/', '_')
@@ -230,7 +256,7 @@ def _worker(rank, world_size, class_chunks, args, examples_dir):
             gen_records.pop(label)
 
     if examples_dir and gen_records:
-        # write any remaining records (e.g. from onepath mode)
+        # ── 刷出剩余记录（如 onepath 模式下残留的）──
         for label, records in gen_records.items():
             class_name = _class_name(label)
             safe_name = class_name.replace(' ', '_').replace('/', '_')
@@ -248,7 +274,7 @@ def _worker(rank, world_size, class_chunks, args, examples_dir):
     logger.info("Done. %d classes processed.", total)
 
 
-def _detect_gpus():
+def _detect_gpus() -> int:
     try:
         import subprocess
         result = subprocess.run(
@@ -260,7 +286,7 @@ def _detect_gpus():
         return 1
 
 
-def main():
+def main() -> None:
     from utils import load_prompts
     args = parse_args()
     prompts = load_prompts(args.prompt_file)

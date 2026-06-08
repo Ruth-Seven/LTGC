@@ -48,7 +48,7 @@ def validate_description(description, class_name):
     """
     if not description or not isinstance(description, str):
         return False
-    desc = description.strip()
+    desc = description.strip().strip("'\"")
 
     if not re.match(r"^A photo of", desc, re.IGNORECASE):
         return False

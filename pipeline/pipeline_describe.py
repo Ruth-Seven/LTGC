@@ -54,6 +54,8 @@ def _describe_with_retry(group_imgs, name, logger, vlm_prompt):
         batch_results = describe_image_batch(p_imgs, prompts)
 
         for idx, desc in zip(p_indices, batch_results):
+            if desc:
+                desc = desc.strip().strip("'\"")
             if desc and validate_description(desc, name):
                 results[idx] = desc
                 logger.info("[VLM output] class=%s: %s", name, desc)

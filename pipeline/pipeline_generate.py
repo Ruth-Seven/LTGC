@@ -79,7 +79,7 @@ def _worker(rank, world_size, class_chunks, args, examples_dir):
     from config import GENERATION_EXAMPLE_DIR
     from model.clip_score import score, score_batch
     from model.image_gen import generate, generate_batch, unload_sd
-    from model.text_llm import refine_description, _unload_model as unload_text_llm
+    from model.text_llm import reflect_one_description, _unload_model as unload_text_llm
     from data_txt.imagenet_label_mapping import get_readable_name as _imagenet_class_name
 
     _class_map = None
@@ -127,7 +127,7 @@ def _worker(rank, world_size, class_chunks, args, examples_dir):
                     else:
                         logger.info("Score %.4f < %s", clip_score, args.thresh)
                         if attempt < args.max_rounds - 1:
-                            refined = refine_description(text, class_name, prompt=args.refine_prompt)
+                            refined = reflect_one_description(text, class_name, prompt=args.reflect_one_prompt)
                             if refined:
                                 logger.info("Refined: %s", refined)
                                 text = refined
@@ -178,7 +178,7 @@ def _worker(rank, world_size, class_chunks, args, examples_dir):
                 if attempt < args.max_rounds - 1:
                     for i in chunk_ids:
                         if not accepted[i]:
-                            refined = refine_description(texts[i], class_name)
+                            refined = reflect_one_description(texts[i], class_name, prompt=args.reflect_one_prompt)
                             if refined:
                                 logger.info("Refined: %s", refined)
                                 texts[i] = refined
@@ -242,7 +242,7 @@ def main():
     from utils import load_prompts
     args = parse_args()
     prompts = load_prompts(args.prompt_file)
-    args.refine_prompt = prompts.get("generate", {}).get("reflection_prompt")
+    args.reflect_one_prompt = prompts.get("generate", {}).get("reflect_one_prompt")
 
     if args.num_gpus == 0:
         num_gpus = _detect_gpus()

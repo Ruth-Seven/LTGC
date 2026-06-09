@@ -209,8 +209,7 @@ def _ddp_worker(rank, world_size, args_dict):
 
         for (cls_id, name), indices in groups.items():
             group_imgs = [data_list[i] for i in indices]
-            descriptions, fails = _describe_with_retry(group_imgs, name, logger,
-                                                       args_dict.get('vlm_prompt'))
+            descriptions, fails = _describe_with_retry(group_imgs, name, logger, args_dict.get('vlm_prompt'))
 
             tail_count += len(indices)
             for i, desc in zip(indices, descriptions):

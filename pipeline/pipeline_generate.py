@@ -130,41 +130,12 @@ def _worker(
         logger.info("[class %s %s] %d descs, thresh=%.2f, max_rounds=%d",
                     label, class_name, n, args.thresh, args.max_rounds)
 
-        # ── 单图模式：逐张生成 + 单张 CLIP 评分（不走批量流水线）──
-        if args.onepath:
-            for text_i, generation_prompt in enumerate(generation_prompts):
-                saved_path = os.path.join(args.data_dir, 'gen_train-onepath.JPEG')
-                desc_accepted = False
-                for attempt in range(args.max_rounds):
-                    img_path = generate(generation_prompt, saved_path)
-                    if img_path is None:
-                        continue
-                    s = score(img_path, clip_prompt)
-                    if s >= args.thresh:
-                        if examples_dir:
-                            gen_records[label].append((generation_prompt, s, img_path))
-                        desc_accepted = True
-                        logger.info("[class %s %s] desc %d/%d accepted in round %d (%.4f)",
-                                    label, class_name, text_i + 1, n, attempt + 1, s)
-                        break
-                    if attempt < args.max_rounds - 1:
-                        refined = reflect_one_description(
-                            generation_prompt, class_name,
-                            prompt=args.reflect_one_prompt,
-                        )
-                        if refined and validate_description(refined, class_name):
-                            generation_prompt = refined
-                        elif refined:
-                            logger.info("[class %s %s] desc %d/%d refine rejected",
-                                        label, class_name, text_i + 1, n)
-                unload_text_llm()
-                if not desc_accepted:
-                    logger.info("[class %s %s] desc %d/%d failed after %d rounds",
-                                label, class_name, text_i + 1, n, args.max_rounds)
-            continue
 
         # ── 批量模式：按 batch 分块，每块内 SD 批量生成 → CLIP 批量评分 → 低分 refine 重试 ──
         save_paths = [os.path.join(dir_path, f"{label}_{i}.JPEG") for i in range(n)]
+        if args.onepath:
+            save_paths = [os.path.join(args.data_dir, 'gen_train-onepath.JPEG')] * n
+            
         accepted = [False] * n
         bs = args.batch
 
@@ -176,6 +147,8 @@ def _worker(
                 # 只处理本轮仍未接受的描述
                 pending = [i for i in chunk_ids if not accepted[i]]
                 if not pending:
+                    logger.info("[class %s %s] round %d/%d: pending empty, all accepted",
+                            label, class_name, attempt + 1, args.max_rounds)
                     break
 
                 # Step A: SD 批量生成图像
@@ -186,6 +159,8 @@ def _worker(
 
                 valid = [(i, p) for i, p in zip(pending, img_paths) if p is not None]
                 if not valid:
+                    logger.warnning("[class %s %s] round %d/%d: empty paths skipped.",
+                            label, class_name, attempt + 1, args.max_rounds)
                     break
 
                 # Step B: CLIP 批量评分
@@ -205,34 +180,38 @@ def _worker(
                         n_acc += 1
                     else:
                         n_rej += 1
-                        logger.warning("[class %s %s] desc %d/%d rejected: %s",
-                                    label, class_name, idx + 1, n, batch_prompts[idx])
+                        logger.warning("[class %s %s]  round %d/%d: desc %d/%d rejected: %s",
+                                    label, class_name, attempt + 1, args.max_roundsm, idx + 1, n, generation_prompts[idx])
                 logger.info("[class %s %s] round %d/%d: accepted=%d rejected=%d",
                             label, class_name, attempt + 1, args.max_rounds, n_acc, n_rej)
 
                 # Step D: 低分描述 refine（调用 text_llm 润色后下一轮重试）
-                if attempt < args.max_rounds - 1:
+                if attempt < args.max_rounds:
                     n_refined = 0
                     for i in chunk_ids:
                         if not accepted[i]:
                             refined = reflect_one_description(
                                 generation_prompts[i], class_name,
                                 prompt=args.reflect_one_prompt,
-                                enable_thinking=True, do_sample=False, 
-                                temperature=0.2, max_token=1000)
+                                enable_thinking=False, do_sample=False, 
+                                temperature=0.2, max_token=100)
                             if not refined:
-                                logger.warn("[class %s %s] round %d/%d: refined an empty description")
+                                logger.warnning("[class %s %s] round %d/%d: refined an empty description", 
+                                            label, class_name, attempt + 1, args.max_rounds)
+                                continue
                             if refined and validate_description(refined, class_name):
                                 generation_prompts[i] = refined
                                 n_refined += 1
                                 logger.info("[class %s %s] round %d/%d: refined: %s",
                                     label, class_name, attempt + 1, args.max_rounds, refined)
                             else:
-                                logger.warn("[class %s %s] round %d/%d: fail to validate refined dst: %s",
+                                logger.warnning("[class %s %s] round %d/%d: fail to validate refined dst: %s",
                                     label, class_name, attempt + 1, args.max_rounds, refined)
                     unload_text_llm()
                         
                 if all(accepted[i] for i in chunk_ids):
+                    logger.info("[class %s %s] round %d/%d: accepted all.",
+                            label, class_name, attempt + 1, args.max_rounds)
                     break
 
         failed = sum(1 for a in accepted if not a)

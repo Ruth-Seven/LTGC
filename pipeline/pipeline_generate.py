@@ -159,7 +159,7 @@ def _worker(
 
                 valid = [(i, p) for i, p in zip(pending, img_paths) if p is not None]
                 if not valid:
-                    logger.warnning("[class %s %s] round %d/%d: empty paths skipped.",
+                    logger.warning("[class %s %s] round %d/%d: empty paths skipped.",
                             label, class_name, attempt + 1, args.max_rounds)
                     break
 
@@ -181,12 +181,12 @@ def _worker(
                     else:
                         n_rej += 1
                         logger.warning("[class %s %s]  round %d/%d: desc %d/%d rejected: %s",
-                                    label, class_name, attempt + 1, args.max_roundsm, idx + 1, n, generation_prompts[idx])
+                                    label, class_name, attempt + 1, args.max_rounds, idx + 1, n, generation_prompts[idx])
                 logger.info("[class %s %s] round %d/%d: accepted=%d rejected=%d",
                             label, class_name, attempt + 1, args.max_rounds, n_acc, n_rej)
 
                 # Step D: 低分描述 refine（调用 text_llm 润色后下一轮重试）
-                if attempt < args.max_rounds:
+                if attempt < args.max_rounds - 1:
                     n_refined = 0
                     for i in chunk_ids:
                         if not accepted[i]:
@@ -196,7 +196,7 @@ def _worker(
                                 enable_thinking=False, do_sample=False, 
                                 temperature=0.2, max_token=100)
                             if not refined:
-                                logger.warnning("[class %s %s] round %d/%d: refined an empty description", 
+                                logger.warning("[class %s %s] round %d/%d: refined an empty description", 
                                             label, class_name, attempt + 1, args.max_rounds)
                                 continue
                             if refined and validate_description(refined, class_name):
@@ -205,7 +205,7 @@ def _worker(
                                 logger.info("[class %s %s] round %d/%d: refined: %s",
                                     label, class_name, attempt + 1, args.max_rounds, refined)
                             else:
-                                logger.warnning("[class %s %s] round %d/%d: fail to validate refined dst: %s",
+                                logger.warning("[class %s %s] round %d/%d: fail to validate refined dst: %s",
                                     label, class_name, attempt + 1, args.max_rounds, refined)
                     unload_text_llm()
                         

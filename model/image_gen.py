@@ -32,7 +32,7 @@ def _get_pipeline():
         safety_checker=None,
     )
     if torch.cuda.is_available():
-        _pipe = _pipe.to(get_device("sd"))
+        _pipe = _pipe.to("cuda:0")
     _version = SD_MODEL_VERSION
     print(f"[image_gen] {SD_MODEL_VERSION} loaded.")
     return _pipe, _version

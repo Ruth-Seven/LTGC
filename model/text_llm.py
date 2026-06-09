@@ -214,10 +214,10 @@ def reflect_one_description(description, class_name, prompt, enable_thinking=Tru
         enable_thinking=enable_thinking,
     )
     removed_thinking = _strip_thinking(response)
-    # 提取第一条 "A photo of..." 描述
-    m = re.search(r"A photo of.*\n", removed_thinking)
+    # 提取第一条 "A photo of..." 描述，允许输出末尾没有换行
+    m = re.search(r"(A photo of[^\n]*)(?:\n|$)", removed_thinking)
     if m:
-        result = m.group(0).split('\n')[0].strip()
+        result = m.group(1).strip()
     else:
         result = ""
     if not result:

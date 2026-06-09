@@ -215,7 +215,7 @@ def reflect_one_description(description, class_name, prompt, enable_thinking=Tru
     )
     removed_thinking = _strip_thinking(response)
     # 提取第一条 "A photo of..." 描述
-    m = re.search(r"A photo of.*", removed_thinking)
+    m = re.search(r"A photo of.*\n", removed_thinking)
     if m:
         result = m.group(0).split('\n')[0].strip()
     else:
@@ -223,6 +223,7 @@ def reflect_one_description(description, class_name, prompt, enable_thinking=Tru
     if not result:
         _log.warning("reflection-one: no valid descriptions generated, returning empty string\n")
         return ""
+    _log.warning("reflection-one: regenerate a description: %s", result)
     return result
 
 

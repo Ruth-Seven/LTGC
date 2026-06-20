@@ -53,12 +53,13 @@ def unload_sd():
         print("[image_gen] SD unloaded, cache cleared.")
 
 
-def generate_batch(prompts, save_paths=None):
+def generate_batch(prompts, save_paths=None, seed=None):
     """从文本描述批量生成图像，UNet batch 并行
 
     Args:
         prompts: 文本提示词列表
         save_paths: 保存路径列表，长度与 prompts 一致
+        seed: 随机种子（为 None 时不固定）
 
     Returns:
         list: 保存路径列表 (成功项为路径，失败项为 None)
@@ -76,6 +77,8 @@ def generate_batch(prompts, save_paths=None):
             if version == "sdxl":
                 kwargs["height"] = SD_IMAGE_SIZE
                 kwargs["width"] = SD_IMAGE_SIZE
+            if seed is not None:
+                kwargs["generator"] = torch.Generator(device="cuda:0").manual_seed(seed)
 
             with torch.no_grad():
                 images = pipe(**kwargs).images

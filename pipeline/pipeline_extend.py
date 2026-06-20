@@ -85,7 +85,7 @@ def _extend_worker(rank, world_size, class_chunks, max_generate_num,
         for ti, text in enumerate(texts):
             raw = extend_descriptions(
                 [text],
-                prompt=ext_prompt.format(number=per_text, class_name=class_name),
+                prompt=ext_prompt.format(number=per_text, name=class_name),
                 number=per_text,
                 enable_thinking=False,
                 max_token=100 * per_text,
@@ -108,7 +108,7 @@ def _extend_worker(rank, world_size, class_chunks, max_generate_num,
             if reflect_list:
                 reflected = reflection_descriptions(
                     [fresh[idx - 1] for idx in reflect_list],
-                    prompt=ref_prompt.format(number=len(reflect_list), class_name=class_name),
+                    prompt=ref_prompt.format(number=len(reflect_list), name=class_name),
                     number=len(reflect_list),
                     enable_thinking=True,
                     max_token=200 * len(reflect_list),

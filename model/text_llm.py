@@ -200,7 +200,7 @@ def reflect_one_description(description, class_name, prompt, enable_thinking=Tru
     if prompt is None:
         raise Exception("reflect_one_description Empty.")
     user_content = description + "\n" + prompt.format(
-        class_name=class_name,
+        name=class_name,
     )
     messages = [
         {"role": "system", "content": SYSTEM_PROMPT},
@@ -234,12 +234,8 @@ def generate_template(class_name, prompt=None):
         class_name: 类别名称
         prompt: 自定义 prompt，支持 {class_name} 占位符。为 None 时使用内置默认
     """
-    if prompt is None:
-        prompt = (
-            "Describe the class '{class_name}' using this format:\n"
-            "'A photo of the class {class_name}, with [features], in [setting].'"
-        )
-    user_content = prompt.format(class_name=class_name)
+
+    user_content = prompt.format(name=class_name)
     messages = [
         {"role": "system", "content": SYSTEM_PROMPT},
         {"role": "user", "content": user_content},

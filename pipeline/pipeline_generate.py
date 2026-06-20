@@ -156,7 +156,7 @@ def _worker(
             for chunk_start in range(0, len(pending), bs):
                 chunk_end = min(chunk_start + bs, len(pending))
                 chunk_idx_slice = pending[chunk_start:chunk_end]
-                batch_prompts = [generation_prompts[i].replace("the class ", "") + SD_STYLE_SUFFIX for i in chunk_idx_slice]
+                batch_prompts = [generation_prompts[i].replace("the class ", "a ") + SD_STYLE_SUFFIX for i in chunk_idx_slice]
                 batch_paths = [save_paths[i] for i in chunk_idx_slice]
                 chunk_paths = generate_batch(batch_prompts, batch_paths)
                 for i, p in zip(chunk_idx_slice, chunk_paths):

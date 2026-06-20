@@ -89,7 +89,7 @@ def _worker(
     logger = setup_logger(f"GPU{rank}", log_path)
 
     # ── 延迟导入：在 CUDA_VISIBLE_DEVICES 设置后再加载模型模块 ──
-    from config import GENERATION_EXAMPLE_DIR
+    from config import GENERATION_EXAMPLE_DIR, SD_STYLE_SUFFIX
     from model.clip_score import score, score_batch
     from model.image_gen import generate, generate_batch, unload_sd
     from model.text_llm import reflect_one_description, _unload_model as unload_text_llm
@@ -156,7 +156,7 @@ def _worker(
             for chunk_start in range(0, len(pending), bs):
                 chunk_end = min(chunk_start + bs, len(pending))
                 chunk_idx_slice = pending[chunk_start:chunk_end]
-                batch_prompts = [generation_prompts[i] for i in chunk_idx_slice]
+                batch_prompts = [generation_prompts[i] + SD_STYLE_SUFFIX for i in chunk_idx_slice]
                 batch_paths = [save_paths[i] for i in chunk_idx_slice]
                 chunk_paths = generate_batch(batch_prompts, batch_paths)
                 for i, p in zip(chunk_idx_slice, chunk_paths):

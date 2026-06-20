@@ -114,117 +114,147 @@ def _worker(
     total = len(class_list)
 
     # ════════════════════════════════════════════════════════════════
-    # 主循环：逐类处理
+    # 主循环：逐类处理（round 级批处理: SD 全量生成 → CLIP 全量评分 → LLM 全量反思）
     # ════════════════════════════════════════════════════════════════
+    import time
+    class_times = []  # (label, class_name, elapsed_sec, n, failed)
+    failed_descs_path = os.path.join(args.log_dir, f"failed_descs_gpu{rank}.log")
+    total_elapsed_start = time.time()
+
     for label_idx, (label, texts) in enumerate(class_list):
+        class_start = time.time()
         class_name = _class_name(label)
         dir_path = os.path.join(args.data_dir, str(label))
         os.makedirs(dir_path, exist_ok=True)
 
-        # ── 准备描述列表和 CLIP 目标 prompt ──
         generation_prompts = [
             str(t).strip() if not pd.isna(t) and str(t).strip() else f'A photo of a {class_name}' for t in texts
         ]
         clip_prompt = f'A photo of a {class_name}'
         n = len(generation_prompts)
-        logger.info("[class %s %s] %d descs, thresh=%.2f, max_rounds=%d",
-                    label, class_name, n, args.thresh, args.max_rounds)
-
-
-        # ── 批量模式：按 batch 分块，每块内 SD 批量生成 → CLIP 批量评分 → 低分 refine 重试 ──
         save_paths = [os.path.join(dir_path, f"{label}_{i}.JPEG") for i in range(n)]
         if args.onepath:
             save_paths = [os.path.join(args.data_dir, 'gen_train-onepath.JPEG')] * n
-            
+
         accepted = [False] * n
+        logger.info("[class %s %s] %d descs, thresh=%.2f, max_rounds=%d",
+                    label, class_name, n, args.thresh, args.max_rounds)
+
         bs = args.batch
+        for round_idx in range(args.max_rounds):
+            round_start = time.time()
+            pending = [i for i in range(n) if not accepted[i]]
+            if not pending:
+                logger.info("[class %s %s] round %d/%d: all accepted, done.",
+                            label, class_name, round_idx + 1, args.max_rounds)
+                break
 
-        for chunk_start in range(0, n, bs):
-            chunk_end = min(chunk_start + bs, n)
-            chunk_ids = list(range(chunk_start, chunk_end))
+            # ── Step A: SD 批量生成图像（SDXL 加载一次，分 chunk 生成）──
+            logger.info("[class %s %s] round %d/%d: generating %d images...",
+                        label, class_name, round_idx + 1, args.max_rounds, len(pending))
+            img_paths_map = {}
+            for chunk_start in range(0, len(pending), bs):
+                chunk_end = min(chunk_start + bs, len(pending))
+                chunk_idx_slice = pending[chunk_start:chunk_end]
+                batch_prompts = [generation_prompts[i] for i in chunk_idx_slice]
+                batch_paths = [save_paths[i] for i in chunk_idx_slice]
+                chunk_paths = generate_batch(batch_prompts, batch_paths)
+                for i, p in zip(chunk_idx_slice, chunk_paths):
+                    if p is not None:
+                        img_paths_map[i] = p
+            unload_sd()
 
-            for attempt in range(args.max_rounds):
-                # 只处理本轮仍未接受的描述
-                pending = [i for i in chunk_ids if not accepted[i]]
-                if not pending:
-                    logger.info("[class %s %s] round %d/%d: pending empty, all accepted",
-                            label, class_name, attempt + 1, args.max_rounds)
-                    break
+            valid_indices = sorted(img_paths_map.keys())
+            if not valid_indices:
+                logger.warning("[class %s %s] round %d/%d: no valid images generated.",
+                               label, class_name, round_idx + 1, args.max_rounds)
+                break
 
-                # Step A: SD 批量生成图像
-                batch_prompts = [generation_prompts[i] for i in pending]
-                batch_paths = [save_paths[i] for i in pending]
-                img_paths = generate_batch(batch_prompts, batch_paths)
-                unload_sd()
+            # ── Step B: CLIP 全量评分 ──
+            valid_paths = [img_paths_map[i] for i in valid_indices]
+            clip_scores = score_batch(valid_paths, [clip_prompt] * len(valid_paths))
 
-                valid = [(i, p) for i, p in zip(pending, img_paths) if p is not None]
-                if not valid:
-                    logger.warning("[class %s %s] round %d/%d: empty paths skipped.",
-                            label, class_name, attempt + 1, args.max_rounds)
-                    break
+            # ── Step C: 按阈值分流 accepted / rejected ──
+            n_acc = 0
+            n_rej = 0
+            for idx, s in zip(valid_indices, clip_scores):
+                if s >= args.thresh:
+                    if examples_dir:
+                        gen_records[label].append((generation_prompts[idx], s, save_paths[idx]))
+                    accepted[idx] = True
+                    n_acc += 1
+                else:
+                    n_rej += 1
+                    logger.warning("[class %s %s]  round %d/%d: desc %d/%d rejected: %s",
+                                   label, class_name, round_idx + 1, args.max_rounds,
+                                   idx + 1, n, generation_prompts[idx])
+            logger.info("[class %s %s] round %d/%d: accepted=%d rejected=%d",
+                        label, class_name, round_idx + 1, args.max_rounds, n_acc, n_rej)
 
-                # Step B: CLIP 批量评分
-                v_idx, v_paths = zip(*valid)
-                clip_scores = score_batch(
-                    list(v_paths), [clip_prompt] * len(v_paths)
-                )
-
-                # Step C: 按阈值分流 accepted / rejected
-                n_acc = 0
-                n_rej = 0
-                for idx, s in zip(v_idx, clip_scores):
-                    if s >= args.thresh:
-                        if examples_dir:
-                            gen_records[label].append((generation_prompts[idx], s, save_paths[idx]))
-                        accepted[idx] = True
-                        n_acc += 1
-                    else:
-                        n_rej += 1
-                        logger.warning("[class %s %s]  round %d/%d: desc %d/%d rejected: %s",
-                                    label, class_name, attempt + 1, args.max_rounds, idx + 1, n, generation_prompts[idx])
-                logger.info("[class %s %s] round %d/%d: accepted=%d rejected=%d",
-                            label, class_name, attempt + 1, args.max_rounds, n_acc, n_rej)
-
-                # Step D: 低分描述 refine（调用 text_llm 润色后下一轮重试）
-                if attempt < args.max_rounds - 1:
+            # ── Step D: 批量反思低分描述（LLM 加载一次，逐个 reflect）──
+            if round_idx < args.max_rounds - 1:
+                rejected = [i for i in range(n) if not accepted[i]]
+                if rejected:
                     n_refined = 0
-                    for i in chunk_ids:
-                        if not accepted[i]:
-                            refined = reflect_one_description(
-                                generation_prompts[i], class_name,
-                                prompt=args.reflect_one_prompt,
-                                enable_thinking=False, do_sample=False, 
-                                temperature=0.2, max_token=100)
-                            if not refined:
-                                logger.warning("[class %s %s] round %d/%d: refined an empty description", 
-                                            label, class_name, attempt + 1, args.max_rounds)
-                                continue
-                            if refined and validate_description(refined, class_name):
-                                generation_prompts[i] = refined
-                                n_refined += 1
-                                logger.info("[class %s %s] round %d/%d: refined: %s",
-                                    label, class_name, attempt + 1, args.max_rounds, refined)
-                            else:
-                                logger.warning("[class %s %s] round %d/%d: fail to validate refined dst: %s",
-                                    label, class_name, attempt + 1, args.max_rounds, refined)
+                    for i in rejected:
+                        refined = reflect_one_description(
+                            generation_prompts[i], class_name,
+                            prompt=args.reflect_one_prompt,
+                            enable_thinking=False, do_sample=False,
+                            temperature=0.2, max_token=100)
+                        if not refined:
+                            logger.warning("[class %s %s] round %d/%d: refined an empty description",
+                                           label, class_name, round_idx + 1, args.max_rounds)
+                            continue
+                        if refined and validate_description(refined, class_name):
+                            generation_prompts[i] = refined
+                            n_refined += 1
+                            logger.info("[class %s %s] round %d/%d: refined: %s",
+                                        label, class_name, round_idx + 1, args.max_rounds, refined)
+                        else:
+                            logger.warning("[class %s %s] round %d/%d: fail to validate refined dst: %s",
+                                           label, class_name, round_idx + 1, args.max_rounds, refined)
                     unload_text_llm()
-                        
-                if all(accepted[i] for i in chunk_ids):
-                    logger.info("[class %s %s] round %d/%d: accepted all.",
-                            label, class_name, attempt + 1, args.max_rounds)
-                    break
+                    logger.info("[class %s %s] round %d/%d: refined %d/%d descriptions.",
+                                label, class_name, round_idx + 1, args.max_rounds,
+                                n_refined, len(rejected))
+
+            if all(accepted):
+                logger.info("[class %s %s] round %d/%d: all accepted.",
+                            label, class_name, round_idx + 1, args.max_rounds)
+                break
 
         failed = sum(1 for a in accepted if not a)
-        logger.info("[class %s %s] done: %d/%d accepted, %d failed",
-                    label, class_name, n - failed, n, failed)
+        elapsed = time.time() - class_start
+        class_times.append((label, class_name, elapsed, n, failed))
+        logger.info("[class %s %s] done: %d/%d accepted, %d failed | elapsed %.1fs",
+                    label, class_name, n - failed, n, failed, elapsed)
 
-        # ── 写入 Markdown：追加 Generated Images 段落 ──
+        # ── 记录最终未通过（满 max_rounds 仍 rejected）的描述 ──
+        if failed > 0:
+            with open(failed_descs_path, 'a') as fd:
+                fd.write(f"\n[class {label} {class_name}] {failed}/{n} failed after {args.max_rounds} rounds:\n")
+                for i in range(n):
+                    if not accepted[i]:
+                        fd.write(f"  [{i}] {generation_prompts[i]}\n")
+
+        # ── ETA 预估 ──
+        if class_times:
+            avg_time = sum(t[2] for t in class_times) / len(class_times)
+            remaining = total - label_idx - 1
+            eta_sec = avg_time * remaining
+            eta_h = int(eta_sec // 3600)
+            eta_m = int((eta_sec % 3600) // 60)
+            logger.info("[GPU%d progress] %d/%d classes | avg %.1fs/class | ETA %dh%dm",
+                        rank, label_idx + 1, total, avg_time, eta_h, eta_m)
+
+        # ── 写入 Markdown ──
         if examples_dir and gen_records.get(label):
             os.makedirs(examples_dir, exist_ok=True)
             safe_name = class_name.replace(' ', '_').replace('/', '_')
             md_path = os.path.join(examples_dir, f"{label}_{safe_name}.md")
             records = gen_records[label]
-            with open(md_path, 'a') as f:
+            with open(md_path, 'w') as f:
                 f.write(f"\n## Generated Images ({len(records)})\n\n")
                 for k, (desc, score, img_path) in enumerate(records, 1):
                     img_rel = f"images/{os.path.relpath(img_path, args.data_dir)}"
@@ -241,7 +271,7 @@ def _worker(
             safe_name = class_name.replace(' ', '_').replace('/', '_')
             md_path = os.path.join(examples_dir, f"{label}_{safe_name}.md")
             os.makedirs(examples_dir, exist_ok=True)
-            with open(md_path, 'a') as f:
+            with open(md_path, 'w') as f:
                 f.write(f"\n## Generated Images ({len(records)})\n\n")
                 for k, (desc, score, img_path) in enumerate(records, 1):
                     img_rel = f"images/{os.path.relpath(img_path, args.data_dir)}"
@@ -288,12 +318,12 @@ def main() -> None:
     for i, item in enumerate(grouped):
         chunks[i % num_gpus].append(item)
 
-    mp.spawn(
-        _worker,
-        args=(num_gpus, chunks, args, args.examples_dir),
-        nprocs=num_gpus,
-        join=True,
-    )
+    ctx = mp.get_context('spawn')
+    with ctx.Pool(processes=num_gpus) as pool:
+        pool.starmap(_worker, [
+            (rank, num_gpus, chunks, args, args.examples_dir)
+            for rank in range(num_gpus)
+        ])
 
     print(f"[generate] All GPUs done.")
 

@@ -508,12 +508,12 @@ def main():
             'vlm_prompt': args.vlm_prompt,
         }
 
-        mp.spawn(
-            _ddp_worker,
-            args=(args.num_gpus, worker_args),
-            nprocs=args.num_gpus,
-            join=True,
-        )
+        ctx = mp.get_context('spawn')
+        with ctx.Pool(processes=args.num_gpus) as pool:
+            pool.starmap(_ddp_worker, [
+                (rank, args.num_gpus, worker_args)
+                for rank in range(args.num_gpus)
+            ])
 
         _merge_parts(args.existing_description_path, args.num_gpus, logger)
         if args.examples_dir:

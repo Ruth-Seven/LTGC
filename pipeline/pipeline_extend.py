@@ -163,7 +163,7 @@ def _extend_worker(rank, world_size, class_chunks, max_generate_num,
             os.makedirs(examples_dir, exist_ok=True)
             safe_name = class_name.replace(' ', '_').replace('/', '_')
             md_path = os.path.join(examples_dir, f"{label}_{safe_name}.md")
-            with open(md_path, 'a') as f:
+            with open(md_path, 'w') as f:
                 f.write(f"\n## Extended Descriptions ({len(all_new)})\n\n")
                 for k, desc in enumerate(all_new, 1):
                     f.write(f"{k}. {desc}\n")
@@ -272,15 +272,15 @@ def main():
     for i, item in enumerate(grouped):
         chunks[i % num_gpus].append(item)
 
-    mp.spawn(
-        _extend_worker,
-        args=(num_gpus, chunks, args.max_generate_num,
-              args.extended_description_path, args.log_dir, class_map,
-              args.examples_dir,
-              extension_prompt, determine_prompt, reflection_prompt),
-        nprocs=num_gpus,
-        join=True,
-    )
+    ctx = mp.get_context('spawn')
+    with ctx.Pool(processes=num_gpus) as pool:
+        pool.starmap(_extend_worker, [
+            (rank, num_gpus, chunks, args.max_generate_num,
+             args.extended_description_path, args.log_dir, class_map,
+             args.examples_dir,
+             extension_prompt, determine_prompt, reflection_prompt)
+            for rank in range(num_gpus)
+        ])
 
     _merge_parts(args.extended_description_path, num_gpus, logger)
     logger.info("Done. Output: %s", args.extended_description_path)

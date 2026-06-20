@@ -54,7 +54,7 @@ def get_device(model_key=None):
 # 本地 VLM 配置（LLaVA / Qwen2-VL 双后端）
 # ============================================================
 LLAVA_MODEL_ID = "/data/model/llava-hf_llava-1.5-7b-hf"
-QWEN2VL_MODEL_ID = "/data/model/Qwen2-VL-7B-Instruct"
+QWEN2VL_MODEL_ID = "/data/hujunjie/models/Qwen2-VL-7B-Instruct"
 LOCAL_VLM_ID = QWEN2VL_MODEL_ID
 VLM_MAX_TOKENS = 200
 VLM_TEMPERATURE = 0.7
@@ -81,23 +81,23 @@ CLIP_MAX_TOKENS = 77 - 2
 # ============================================================
 SD_MODEL_VERSION = "sdxl"       # "v1_5" 或 "sdxl"
 SD_V1_5_PATH = "/data/model/runwayml_stable-diffusion-v1-5"
-SDXL_PATH = "/data/model/stable-diffusion-xl-base-1.0"
+SDXL_PATH = "/data/hujunjie/models/sdxl-base-1.0-runtime-fp16"
 SD_MODEL_ID = "runwayml/stable-diffusion-v1-5"
-SD_IMAGE_SIZE = 1024
+SD_IMAGE_SIZE = 512
 SD_NUM_INFERENCE_STEPS = 30
 SD_GUIDANCE_SCALE = 7.5
 
 # ============================================================
 # 数据路径配置
 # ============================================================
-DATA_DIR = "/data"
+DATA_DIR = "/data/hujunjie/generate/ltgc/runtime-data"
 PWD=os.path.abspath(os.path.dirname(__file__))
 DESCRIPTIONS_DIR = os.path.join(DATA_DIR, "descriptions_data")
 GENERATION_EXAMPLE_DIR=os.path.join(PWD, "example/generation_examples")
 DESCRIPTION_EXAMPLE_DIR=os.path.join(PWD, "example/description_examples")
 EXTENDED_DESCRIPTION_PATH=os.path.join(DESCRIPTIONS_DIR, 'extended_description.csv')
 GEN_TRAIN_DIR = os.path.join(DATA_DIR, "gen_train")
-IMAGENET_DIR = "/data/dataset/imagenet-lt/torch_image_folder/mnt/volume_sfo3_01/imagenet-lt/ImageDataset"
+IMAGENET_DIR = "/data/hujunjie/datasets/imagentlt/imagenet-lt-v2"
 TEST_IMAGE_PATH = os.path.join(DATA_DIR, "test.jpg")
 CLASS_COUNT_FILE = os.path.join(DATA_DIR, "imagenetlt_class_count.json")
 

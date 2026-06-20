@@ -158,7 +158,7 @@ def _worker(
                 chunk_idx_slice = pending[chunk_start:chunk_end]
                 batch_prompts = [generation_prompts[i] for i in chunk_idx_slice]
                 batch_paths = [save_paths[i] for i in chunk_idx_slice]
-                chunk_paths = generate_batch(batch_prompts, batch_paths, seed=int(label))
+                chunk_paths = generate_batch(batch_prompts, batch_paths)
                 for i, p in zip(chunk_idx_slice, chunk_paths):
                     if p is not None:
                         img_paths_map[i] = p

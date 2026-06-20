@@ -76,6 +76,7 @@ def generate_batch(prompts, save_paths=None):
             if version == "sdxl":
                 kwargs["height"] = SD_IMAGE_SIZE
                 kwargs["width"] = SD_IMAGE_SIZE
+                kwargs["negative_prompt"] = ["cartoon, painting, blurry, low quality, distorted, bad anatomy, watermark"] * n
 
             with torch.no_grad():
                 images = pipe(**kwargs).images

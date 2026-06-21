@@ -81,14 +81,14 @@ def _worker(
     examples_dir: Optional[str],
 ) -> None:
     """单 GPU worker：SD 生成 → CLIP 筛选 → 低分 refine 重试"""
-    # ── 进程隔离：每 worker 绑定一张 GPU（通过 CUDA_VISIBLE_DEVICES）──
-    os.environ["CUDA_VISIBLE_DEVICES"] = str(rank)
+    import torch as _torch
+    _torch.cuda.set_device(rank)
 
     os.makedirs(args.log_dir, exist_ok=True)
     log_path = os.path.join(args.log_dir, f"generate_gpu_{rank}.log")
     logger = setup_logger(f"GPU{rank}", log_path)
 
-    # ── 延迟导入：在 CUDA_VISIBLE_DEVICES 设置后再加载模型模块 ──
+    # ── 延迟导入：在 set_device 后加载模型，确保模型在指定 GPU 上 ──
     from config import GENERATION_EXAMPLE_DIR, SD_STYLE_SUFFIX
     from model.clip_score import score, score_batch
     from model.image_gen import generate, generate_batch, unload_sd

@@ -141,12 +141,11 @@ def _loader_kwargs(num_workers):
 
 def _ddp_worker(rank, world_size, args_dict):
     """DDP worker rank/GPU N: DistributedSampler 自动按 rank 分片数据"""
-    os.environ['CUDA_VISIBLE_DEVICES'] = str(rank)
     os.environ['MASTER_ADDR'] = 'localhost'
     os.environ['MASTER_PORT'] = str(args_dict['master_port'])
 
     dist.init_process_group("gloo", rank=rank, world_size=world_size)
-    torch.cuda.set_device(0)
+    torch.cuda.set_device(rank)
 
     set_backend(args_dict['vlm_backend'])
 

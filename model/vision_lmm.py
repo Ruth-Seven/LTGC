@@ -87,7 +87,7 @@ def _load_model():
         _model = ModelClass.from_pretrained(
             _model_path,
             torch_dtype=dtype,
-            device_map="auto",
+            device_map={"": torch.cuda.current_device()},
         )
     except torch.cuda.OutOfMemoryError:
         _log.info("GPU OOM, falling back to CPU (float32)...")

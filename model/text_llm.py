@@ -39,7 +39,7 @@ def _load_model():
     _model = AutoModelForCausalLM.from_pretrained(
         TEXT_LLM_MODEL_ID,
         torch_dtype=dtype,
-        device_map="auto",
+        device_map={"": torch.cuda.current_device()},
     )
     _tokenizer = AutoTokenizer.from_pretrained(TEXT_LLM_MODEL_ID)
     _log.info("Model loaded.")

@@ -24,33 +24,6 @@ if _env_file.exists():
 
 
 # ============================================================
-# GPU 分配（LRU 算法）
-# ============================================================
-class _LRUAllocator:
-    def __init__(self):
-        
-        n = torch.cuda.device_count()
-        if n == 0:
-            self.id_que = [-1] # CPU 模式
-        else:
-            self.id_que = [i for i in range(n)]
-
-    def allocate(self):
-        gpu_id = self.id_que[0]
-        if gpu_id == -1:
-            return f"cpu"
-
-        self.id_que.pop(0)
-        self.id_que.append(gpu_id)
-        print(f"分配到cuda {gpu_id}.\n")
-        return f"cuda:{gpu_id}"
-
-_gpu_alloc = _LRUAllocator()
-
-def get_device(model_key=None):
-    return _gpu_alloc.allocate()
-
-# ============================================================
 # 本地 VLM 配置（LLaVA / Qwen2-VL 双后端）
 # ============================================================
 LLAVA_MODEL_ID = "/data/model/llava-hf_llava-1.5-7b-hf"

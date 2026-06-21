@@ -49,7 +49,8 @@ def _get_class_name(label, class_map):
 def _extend_worker(rank, world_size, class_chunks, max_generate_num,
                    output_base, log_dir, class_map, examples_dir,
                    ext_prompt, det_prompt, ref_prompt):
-    os.environ["CUDA_VISIBLE_DEVICES"] = str(rank)
+    import torch as _torch
+    _torch.cuda.set_device(rank)
 
     os.makedirs(log_dir, exist_ok=True)
     log_path = os.path.join(log_dir, f"pipeline_extend_gpu{rank}.log")

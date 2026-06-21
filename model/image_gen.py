@@ -6,7 +6,7 @@ import torch
 from diffusers import StableDiffusionPipeline, StableDiffusionXLPipeline
 import os
 
-from config import SD_MODEL_VERSION, SD_V1_5_PATH, SDXL_PATH, SD_IMAGE_SIZE, SD_NUM_INFERENCE_STEPS, SD_GUIDANCE_SCALE, get_device
+from config import SD_MODEL_VERSION, SD_V1_5_PATH, SDXL_PATH, SD_IMAGE_SIZE, SD_NUM_INFERENCE_STEPS, SD_GUIDANCE_SCALE
 
 
 _pipe = None
@@ -32,7 +32,7 @@ def _get_pipeline():
         safety_checker=None,
     )
     if torch.cuda.is_available():
-        _pipe = _pipe.to("cuda:0")
+        _pipe = _pipe.to(f"cuda:{torch.cuda.current_device()}")
     _version = SD_MODEL_VERSION
     print(f"[image_gen] {SD_MODEL_VERSION} loaded.")
     return _pipe, _version

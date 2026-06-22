@@ -58,7 +58,9 @@ def validate_description(description, class_name):
 
     if f"{class_name}".lower() not in desc.lower():
         return False
-
+    
+    if '[' in desc or ']' in desc:
+        return False
     return True
 
 

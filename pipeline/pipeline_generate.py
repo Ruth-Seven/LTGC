@@ -6,6 +6,7 @@ LTGC 流水线 - Step 3: 图像生成
 import os
 import sys
 import csv
+import hashlib
 import shutil
 import argparse
 import logging
@@ -65,6 +66,11 @@ def setup_logger(name: str, log_path: str) -> logging.Logger:
     return logger
 
 
+def _hash_filename(label, description: str) -> str:
+    h = hashlib.md5(description.encode()).hexdigest()[:12]
+    return f"{label}_{h}.JPEG"
+
+
 def save_generation_markdown(records: list[tuple[str, str, str, float]], output_dir: str) -> None:
     os.makedirs(output_dir, exist_ok=True)
     md_path = os.path.join(output_dir, "generation_examples.md")
@@ -89,6 +95,7 @@ def _worker(
     class_chunks: list[list[tuple[int, list[str]]]],
     args: argparse.Namespace,
     examples_dir: Optional[str],
+    result_queue: Optional[mp.Queue] = None,
 ) -> None:
     """单 GPU worker：SD 生成 → CLIP 筛选 → 低分 refine 重试"""
     import torch as _torch
@@ -144,7 +151,7 @@ def _worker(
         ]
         clip_prompt = f'A photo of a {class_name}'
         n = len(generation_prompts)
-        save_paths = [os.path.join(dir_path, f"{label}_{i}.JPEG") for i in range(n)]
+        save_paths = [os.path.join(dir_path, _hash_filename(label, generation_prompts[i])) for i in range(n)]
         if args.onepath:
             save_paths = [os.path.join(args.data_dir, 'gen_train-onepath.JPEG')] * n
 
@@ -152,6 +159,23 @@ def _worker(
         last_clip_score = [0.0] * n
         logger.info("[class %s %s] %d descs, thresh=%.2f, max_rounds=%d",
                     label, class_name, n, args.thresh, args.max_rounds)
+
+        # ── 断点续传：检查已有图片 ──
+        resumed = 0
+        for i in range(n):
+            if os.path.exists(save_paths[i]):
+                accepted[i] = True
+                success_list.append((label, class_name, -1.0, generation_prompts[i], save_paths[i]))
+                if examples_dir:
+                    gen_records[label].append((generation_prompts[i], -1.0, save_paths[i]))
+                resumed += 1
+        if resumed > 0:
+            logger.info("[class %s %s] resumed %d/%d from existing images",
+                        label, class_name, resumed, n)
+
+        if all(accepted):
+            logger.info("[class %s %s] all resumed, skip.", label, class_name)
+            continue
 
         bs = args.batch
         for round_idx in range(args.max_rounds):
@@ -319,6 +343,8 @@ def _worker(
         writer.writerows(fail_list)
     logger.info("Written fail list: %d entries to %s", len(fail_list), fail_path)
 
+    if result_queue is not None:
+        result_queue.put((success_list, fail_list))
     return success_list, fail_list
 
 
@@ -357,12 +383,10 @@ def main() -> None:
         for i, item in enumerate(grouped):
             chunks[i % num_gpus].append(item)
 
-        ctx = mp.get_context('spawn')
-        with ctx.Pool(processes=num_gpus) as pool:
-            results = pool.starmap(_worker, [
-                (rank, num_gpus, chunks, args, args.examples_dir)
-                for rank in range(num_gpus)
-            ])
+        result_queue = mp.Queue()
+        mp.spawn(_worker, args=(num_gpus, chunks, args, args.examples_dir, result_queue),
+                 nprocs=num_gpus, join=True)
+        results = [result_queue.get() for _ in range(num_gpus)]
 
         print(f"[generate] All GPUs done.")
 
@@ -408,6 +432,26 @@ def main() -> None:
     print(f"[generate] Success: {len(all_success)}, Fail: {len(updated_fail)}")
     print(f"[generate] Merged lists -> {generated_imgs_dir}/")
     print(f"[generate] Fail images moved to {fail_img_dir}")
+
+    # ── 生成 fail examples (单文件) ──
+    if args.examples_dir and updated_fail:
+        fail_examples_dir = os.path.join(args.examples_dir, "fail")
+        os.makedirs(fail_examples_dir, exist_ok=True)
+
+        fail_images_link = os.path.join(fail_examples_dir, "images")
+        if not os.path.exists(fail_images_link):
+            os.symlink(os.path.relpath(fail_img_dir, fail_examples_dir), fail_images_link)
+
+        fail_md_path = os.path.join(fail_examples_dir, "failed_examples.md")
+        with open(fail_md_path, 'w', encoding='utf-8') as f:
+            f.write(f"# Failed Images ({len(updated_fail)})\n\n")
+            for k, (cid, cname, score, desc, path) in enumerate(updated_fail, 1):
+                rel = f"images/{cid}/{os.path.basename(path)}"
+                f.write(f"## {k}. class {cid} {cname}\n\n")
+                f.write(f"![Image {k}]({rel})\n\n")
+                f.write(f"**Description:** {desc}\n\n")
+                f.write(f"**CLIP Score:** {score:.4f}\n\n---\n\n")
+        print(f"[generate] Fail examples -> {fail_md_path}")
 
 
 if __name__ == "__main__":

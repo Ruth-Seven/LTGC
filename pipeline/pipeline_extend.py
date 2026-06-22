@@ -282,15 +282,11 @@ def main():
     for i, item in enumerate(grouped):
         chunks[i % num_gpus].append(item)
 
-    ctx = mp.get_context('spawn')
-    with ctx.Pool(processes=num_gpus) as pool:
-        pool.starmap(_extend_worker, [
-            (rank, num_gpus, chunks, args.max_generate_num,
+    mp.spawn(_extend_worker, args=(num_gpus, chunks, args.max_generate_num,
              args.extended_description_path, args.log_dir, class_map,
              args.examples_dir,
-             extension_prompt, determine_prompt, reflection_prompt)
-            for rank in range(num_gpus)
-        ])
+             extension_prompt, determine_prompt, reflection_prompt),
+        nprocs=num_gpus, join=True)
 
     _merge_parts(args.extended_description_path, num_gpus, logger)
     logger.info("Done. Output: %s", args.extended_description_path)

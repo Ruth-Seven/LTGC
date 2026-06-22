@@ -129,6 +129,15 @@ def setup_logger(name, log_path):
         "[%(name)s %(asctime)s] %(message)s", datefmt="%H:%M:%S"
     ))
     logger.addHandler(fh)
+
+    # Route submodule loggers (text_llm, vision_lmm) to the same file
+    for sub_name in ("text_llm", "vision_lmm"):
+        sub_logger = logging.getLogger(sub_name)
+        sub_logger.handlers.clear()
+        sub_logger.addHandler(fh)
+        sub_logger.setLevel(logging.INFO)
+        sub_logger.propagate = False
+
     return logger
 
 

@@ -5,6 +5,7 @@ LTGC 流水线 - Step 3: 图像生成
 """
 import os
 import sys
+import csv
 import shutil
 import argparse
 import logging
@@ -52,6 +53,15 @@ def setup_logger(name: str, log_path: str) -> logging.Logger:
         "[%(name)s %(asctime)s] %(message)s", datefmt="%H:%M:%S"
     ))
     logger.addHandler(fh)
+
+    # Route submodule loggers (text_llm, vision_lmm) to the same file
+    for sub_name in ("text_llm", "vision_lmm"):
+        sub_logger = logging.getLogger(sub_name)
+        sub_logger.handlers.clear()
+        sub_logger.addHandler(fh)
+        sub_logger.setLevel(logging.INFO)
+        sub_logger.propagate = False
+
     return logger
 
 
@@ -110,6 +120,8 @@ def _worker(
     examples_dir = examples_dir or args.md
 
     gen_records = defaultdict(list) if examples_dir else None
+    success_list = []
+    fail_list = []
     class_list = class_chunks[rank]
     total = len(class_list)
 
@@ -118,7 +130,7 @@ def _worker(
     # ════════════════════════════════════════════════════════════════
     import time
     class_times = []  # (label, class_name, elapsed_sec, n, failed)
-    failed_descs_path = os.path.join(args.log_dir, f"failed_descs_gpu{rank}.log")
+    failed_descs_path = os.path.join(args.log_dir, f"generate_failed_descs_gpu{rank}.log")
     total_elapsed_start = time.time()
 
     for label_idx, (label, texts) in enumerate(class_list):
@@ -137,6 +149,7 @@ def _worker(
             save_paths = [os.path.join(args.data_dir, 'gen_train-onepath.JPEG')] * n
 
         accepted = [False] * n
+        last_clip_score = [0.0] * n
         logger.info("[class %s %s] %d descs, thresh=%.2f, max_rounds=%d",
                     label, class_name, n, args.thresh, args.max_rounds)
 
@@ -178,16 +191,18 @@ def _worker(
             n_acc = 0
             n_rej = 0
             for idx, s in zip(valid_indices, clip_scores):
+                last_clip_score[idx] = s
                 if s >= args.thresh:
                     if examples_dir:
                         gen_records[label].append((generation_prompts[idx], s, save_paths[idx]))
                     accepted[idx] = True
                     n_acc += 1
+                    success_list.append((label, class_name, s, generation_prompts[idx], save_paths[idx]))
                 else:
                     n_rej += 1
-                    logger.warning("[class %s %s]  round %d/%d: desc %d/%d rejected: %s",
+                    logger.warning("[class %s %s]  round %d/%d: desc %d/%d  score:%d rejected: %s",
                                    label, class_name, round_idx + 1, args.max_rounds,
-                                   idx + 1, n, generation_prompts[idx])
+                                   idx + 1, n, s ,generation_prompts[idx])
             logger.info("[class %s %s] round %d/%d: accepted=%d rejected=%d",
                         label, class_name, round_idx + 1, args.max_rounds, n_acc, n_rej)
 
@@ -229,6 +244,11 @@ def _worker(
         class_times.append((label, class_name, elapsed, n, failed))
         logger.info("[class %s %s] done: %d/%d accepted, %d failed | elapsed %.1fs",
                     label, class_name, n - failed, n, failed, elapsed)
+
+        # ── 收集失败条目 ──
+        for i in range(n):
+            if not accepted[i]:
+                fail_list.append((label, class_name, last_clip_score[i], generation_prompts[i], save_paths[i]))
 
         # ── 记录最终未通过（满 max_rounds 仍 rejected）的描述 ──
         if failed > 0:
@@ -282,6 +302,25 @@ def _worker(
 
     logger.info("Done. %d classes processed.", total)
 
+    # ── 写入 per-worker CSV ──
+    success_path = os.path.join(args.log_dir, f"success_gpu{rank}.csv")
+    fail_path = os.path.join(args.log_dir, f"fail_gpu{rank}.csv")
+    header = ['id', 'class_name', 'clip_score', 'description', 'img_path']
+
+    with open(success_path, 'w', newline='', encoding='utf-8') as f:
+        writer = csv.writer(f)
+        writer.writerow(header)
+        writer.writerows(success_list)
+    logger.info("Written success list: %d entries to %s", len(success_list), success_path)
+
+    with open(fail_path, 'w', newline='', encoding='utf-8') as f:
+        writer = csv.writer(f)
+        writer.writerow(header)
+        writer.writerows(fail_list)
+    logger.info("Written fail list: %d entries to %s", len(fail_list), fail_path)
+
+    return success_list, fail_list
+
 
 def _detect_gpus() -> int:
     try:
@@ -310,22 +349,65 @@ def main() -> None:
     grouped = sorted(df.groupby('label')['text'].apply(list).items())
 
     if num_gpus <= 1:
-        _worker(0, 1, [grouped], args, args.examples_dir)
-        return
+        s, f = _worker(0, 1, [grouped], args, args.examples_dir)
+        results = [(s, f)]
+    else:
+        print(f"[generate] Using {num_gpus} GPUs, {len(grouped)} classes total")
+        chunks = [[] for _ in range(num_gpus)]
+        for i, item in enumerate(grouped):
+            chunks[i % num_gpus].append(item)
 
-    print(f"[generate] Using {num_gpus} GPUs, {len(grouped)} classes total")
-    chunks = [[] for _ in range(num_gpus)]
-    for i, item in enumerate(grouped):
-        chunks[i % num_gpus].append(item)
+        ctx = mp.get_context('spawn')
+        with ctx.Pool(processes=num_gpus) as pool:
+            results = pool.starmap(_worker, [
+                (rank, num_gpus, chunks, args, args.examples_dir)
+                for rank in range(num_gpus)
+            ])
 
-    ctx = mp.get_context('spawn')
-    with ctx.Pool(processes=num_gpus) as pool:
-        pool.starmap(_worker, [
-            (rank, num_gpus, chunks, args, args.examples_dir)
-            for rank in range(num_gpus)
-        ])
+        print(f"[generate] All GPUs done.")
 
-    print(f"[generate] All GPUs done.")
+    # ── 合并所有 worker 的 success / fail 列表 ──
+    all_success = []
+    all_fail = []
+    for s, f in results:
+        all_success.extend(s)
+        all_fail.extend(f)
+
+    # ── 移动失败图片到 generated_imgs/fail/ ──
+    generated_imgs_dir = os.path.join(args.data_dir, "generated_imgs")
+    fail_img_dir = os.path.join(generated_imgs_dir, "fail")
+    os.makedirs(fail_img_dir, exist_ok=True)
+
+    updated_fail = []
+    for class_id, class_name, clip_score, desc, img_path in all_fail:
+        target_dir = os.path.join(fail_img_dir, str(class_id))
+        os.makedirs(target_dir, exist_ok=True)
+        target_path = os.path.join(target_dir, os.path.basename(img_path))
+        try:
+            shutil.move(img_path, target_path)
+        except FileNotFoundError:
+            pass
+        updated_fail.append((class_id, class_name, clip_score, desc, target_path))
+
+    # ── 写入合并 CSV ──
+    header = ['id', 'class_name', 'clip_score', 'description', 'img_path']
+    os.makedirs(generated_imgs_dir, exist_ok=True)
+
+    success_merged_path = os.path.join(generated_imgs_dir, "success_list.csv")
+    with open(success_merged_path, 'w', newline='', encoding='utf-8') as f:
+        writer = csv.writer(f)
+        writer.writerow(header)
+        writer.writerows(all_success)
+
+    fail_merged_path = os.path.join(generated_imgs_dir, "fail_list.csv")
+    with open(fail_merged_path, 'w', newline='', encoding='utf-8') as f:
+        writer = csv.writer(f)
+        writer.writerow(header)
+        writer.writerows(updated_fail)
+
+    print(f"[generate] Success: {len(all_success)}, Fail: {len(updated_fail)}")
+    print(f"[generate] Merged lists -> {generated_imgs_dir}/")
+    print(f"[generate] Fail images moved to {fail_img_dir}")
 
 
 if __name__ == "__main__":

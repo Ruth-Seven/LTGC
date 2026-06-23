@@ -263,6 +263,7 @@ def _worker(
     import time
     class_times = []  # (label, class_name, elapsed_sec, n, failed)
     failed_descs_path = os.path.join(args.log_dir, f"pipeline_generate_failed_descs_gpu{rank}.log")
+    open(failed_descs_path, "w").close()
     total_elapsed_start = time.time()
     generated_imgs_dir = os.path.abspath(args.data_dir)
     fail_img_dir = os.path.join(generated_imgs_dir, "fail")
@@ -393,18 +394,18 @@ def _worker(
                     if abs_path not in recorded_success_paths:
                         accepted_rows.append(score_row)
                         recorded_success_paths.add(abs_path)
+                    logger.info("[class %s %s]  round %d/%d: desc %d/%d [accpepted] score:%.4f prompt:%s path: %s\n",
+                                   label, class_name, round_idx + 1, args.max_rounds,
+                                   idx + 1, n, s ,generation_prompts[idx], save_paths[idx])
                 else:
                     n_rej += 1
                     rejected_path = _move_rejected_image(
                         save_paths[idx], fail_img_dir, label, round_idx
                     )
                     current_img_paths[idx] = rejected_path
-                    logger.warning("[class %s %s]  round %d/%d: desc %d/%d  score:%.4f rejected: %s",
+                    logger.warning("[class %s %s]  round %d/%d: desc %d/%d  score:%.4f rejected: %s \n move to: %s",
                                    label, class_name, round_idx + 1, args.max_rounds,
-                                   idx + 1, n, s ,generation_prompts[idx])
-                    logger.info("[class %s %s] round %d/%d: moved rejected image to %s",
-                                label, class_name, round_idx + 1, args.max_rounds,
-                                rejected_path)
+                                   idx + 1, n, s ,generation_prompts[idx],rejected_path)
             split_elapsed = time.perf_counter() - split_start
             shard_write_start = time.perf_counter()
             _append_rows(success_part_path, csv_header, accepted_rows)

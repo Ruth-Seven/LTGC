@@ -49,14 +49,14 @@ def parse_args() -> argparse.Namespace:
 def setup_logger(name: str, log_path: str) -> logging.Logger:
     logger = logging.getLogger(name)
     logger.setLevel(logging.INFO)
-    fh = logging.FileHandler(log_path)
+    fh = logging.FileHandler(log_path, mode="w")
     fh.setFormatter(logging.Formatter(
         "[%(name)s %(asctime)s] %(message)s", datefmt="%H:%M:%S"
     ))
     logger.addHandler(fh)
 
-    # Route submodule loggers (text_llm, vision_lmm) to the same file
-    for sub_name in ("text_llm", "vision_lmm"):
+    # Route submodule loggers to the same file
+    for sub_name in ("text_llm", "vision_lmm", "clip_score"):
         sub_logger = logging.getLogger(sub_name)
         sub_logger.handlers.clear()
         sub_logger.addHandler(fh)
@@ -69,6 +69,131 @@ def setup_logger(name: str, log_path: str) -> logging.Logger:
 def _hash_filename(label, description: str) -> str:
     h = hashlib.md5(description.encode()).hexdigest()[:12]
     return f"{label}_{h}.JPEG"
+
+
+def _append_rows(path: str, header: list[str], rows: list[tuple]) -> None:
+    """Append rows with a header on first write."""
+    if not rows:
+        return
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    exists = os.path.exists(path)
+    with open(path, "a", newline="", encoding="utf-8") as f:
+        writer = csv.writer(f)
+        if not exists:
+            writer.writerow(header)
+        writer.writerows(rows)
+
+
+def _load_success_score_cache(data_dir: str) -> dict[str, float]:
+    """Load per-image CLIP scores from prior full or sharded success CSVs."""
+    import glob
+
+    cache = {}
+    root = os.path.abspath(data_dir)
+    paths = [os.path.join(root, "success_list.csv")]
+    paths.extend(sorted(glob.glob(os.path.join(root, "parts", "success_gpu*.csv"))))
+    for path in paths:
+        if not os.path.exists(path):
+            continue
+        with open(path, newline="", encoding="utf-8") as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                img_path = row.get("img_path")
+                score = row.get("clip_score")
+                if not img_path or score in (None, ""):
+                    continue
+                try:
+                    cache[os.path.abspath(img_path)] = float(score)
+                except ValueError:
+                    continue
+    return cache
+
+
+def _load_recorded_paths(path: str) -> set[str]:
+    """Load image paths already recorded in a sharded CSV."""
+    if not os.path.exists(path):
+        return set()
+    paths = set()
+    with open(path, newline="", encoding="utf-8") as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            img_path = row.get("img_path")
+            if img_path:
+                paths.add(os.path.abspath(img_path))
+    return paths
+
+
+def _move_rejected_image(img_path: str, fail_img_dir: str, label: Any,
+                         round_idx: int) -> str:
+    """Move a rejected image out of train/ immediately and return its fail path."""
+    target_dir = os.path.join(fail_img_dir, str(label))
+    os.makedirs(target_dir, exist_ok=True)
+    target_name = f"round{round_idx + 1}_{os.path.basename(img_path)}"
+    target_path = os.path.join(target_dir, target_name)
+    if os.path.abspath(img_path) == os.path.abspath(target_path):
+        return target_path
+    try:
+        shutil.move(img_path, target_path)
+    except FileNotFoundError:
+        pass
+    return target_path
+
+
+def _unique_path(path: str) -> str:
+    """Return a non-conflicting path by adding a numeric suffix if needed."""
+    if not os.path.exists(path):
+        return path
+    root, ext = os.path.splitext(path)
+    idx = 1
+    while True:
+        candidate = f"{root}_{idx}{ext}"
+        if not os.path.exists(candidate):
+            return candidate
+        idx += 1
+
+
+def _reconcile_train_images(
+    train_dir: str,
+    fail_img_dir: str,
+    success_rows: list[tuple],
+) -> tuple[list[tuple], list[tuple[str, str]], list[tuple[str, str]]]:
+    """Keep train/ aligned with success rows and move extra images to fail/unknown."""
+    image_exts = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
+    existing_success = []
+    missing_success = []
+    success_paths = set()
+
+    for row in success_rows:
+        img_path = os.path.abspath(row[4])
+        if os.path.exists(img_path):
+            existing_success.append(row)
+            success_paths.add(img_path)
+        else:
+            missing_success.append((str(row[0]), img_path))
+
+    moved_unknown = []
+    unknown_root = os.path.join(fail_img_dir, "unknown")
+    if os.path.isdir(train_dir):
+        for root, _, files in os.walk(train_dir):
+            for name in files:
+                src = os.path.abspath(os.path.join(root, name))
+                if os.path.splitext(name)[1].lower() not in image_exts:
+                    continue
+                if src in success_paths:
+                    continue
+                rel_parent = os.path.relpath(root, train_dir)
+                if rel_parent == ".":
+                    rel_parent = "root"
+                target_dir = os.path.join(unknown_root, rel_parent)
+                os.makedirs(target_dir, exist_ok=True)
+                target = _unique_path(os.path.join(target_dir, name))
+                try:
+                    shutil.move(src, target)
+                    moved_unknown.append((src, target))
+                except FileNotFoundError:
+                    pass
+
+    return existing_success, missing_success, moved_unknown
 
 
 def save_generation_markdown(records: list[tuple[str, str, str, float]], output_dir: str) -> None:
@@ -102,7 +227,7 @@ def _worker(
     _torch.cuda.set_device(rank)
 
     os.makedirs(args.log_dir, exist_ok=True)
-    log_path = os.path.join(args.log_dir, f"generate_gpu_{rank}.log")
+    log_path = os.path.join(args.log_dir, f"pipeline_generate_gpu_{rank}.log")
     logger = setup_logger(f"GPU{rank}", log_path)
 
     # ── 延迟导入：在 set_device 后加载模型，确保模型在指定 GPU 上 ──
@@ -137,13 +262,25 @@ def _worker(
     # ════════════════════════════════════════════════════════════════
     import time
     class_times = []  # (label, class_name, elapsed_sec, n, failed)
-    failed_descs_path = os.path.join(args.log_dir, f"generate_failed_descs_gpu{rank}.log")
+    failed_descs_path = os.path.join(args.log_dir, f"pipeline_generate_failed_descs_gpu{rank}.log")
     total_elapsed_start = time.time()
+    generated_imgs_dir = os.path.abspath(args.data_dir)
+    fail_img_dir = os.path.join(generated_imgs_dir, "fail")
+    parts_dir = os.path.join(generated_imgs_dir, "parts")
+    csv_header = ['id', 'class_name', 'clip_score', 'description', 'img_path']
+    success_part_path = os.path.join(parts_dir, f"success_gpu{rank}.csv")
+    score_cache = _load_success_score_cache(generated_imgs_dir)
+    recorded_success_paths = _load_recorded_paths(success_part_path)
+    logger.info(
+        "Resume cache loaded: %d scored success images; shard success already has %d rows at %s",
+        len(score_cache), len(recorded_success_paths), success_part_path,
+    )
 
     for label_idx, (label, texts) in enumerate(class_list):
         class_start = time.time()
         class_name = _class_name(label)
-        dir_path = os.path.join(args.data_dir, str(label))
+        train_dir = os.path.join(args.data_dir, "train")
+        dir_path = os.path.join(train_dir, str(label))
         os.makedirs(dir_path, exist_ok=True)
 
         generation_prompts = [
@@ -154,6 +291,7 @@ def _worker(
         save_paths = [os.path.join(dir_path, _hash_filename(label, generation_prompts[i])) for i in range(n)]
         if args.onepath:
             save_paths = [os.path.join(args.data_dir, 'gen_train-onepath.JPEG')] * n
+        current_img_paths = save_paths[:]
 
         accepted = [False] * n
         last_clip_score = [0.0] * n
@@ -162,16 +300,27 @@ def _worker(
 
         # ── 断点续传：检查已有图片 ──
         resumed = 0
+        resumed_rows = []
         for i in range(n):
             if os.path.exists(save_paths[i]):
                 accepted[i] = True
-                success_list.append((label, class_name, -1.0, generation_prompts[i], save_paths[i]))
+                cached_score = score_cache.get(os.path.abspath(save_paths[i]), -1.0)
+                last_clip_score[i] = cached_score
+                row = (label, class_name, cached_score, generation_prompts[i], save_paths[i])
+                success_list.append(row)
+                abs_path = os.path.abspath(save_paths[i])
+                if abs_path not in recorded_success_paths:
+                    resumed_rows.append(row)
+                    recorded_success_paths.add(abs_path)
                 if examples_dir:
-                    gen_records[label].append((generation_prompts[i], -1.0, save_paths[i]))
+                    gen_records[label].append((generation_prompts[i], cached_score, save_paths[i]))
                 resumed += 1
+        _append_rows(success_part_path, csv_header, resumed_rows)
         if resumed > 0:
             logger.info("[class %s %s] resumed %d/%d from existing images",
                         label, class_name, resumed, n)
+            logger.info("[class %s %s] wrote %d resumed rows to shard success CSV",
+                        label, class_name, len(resumed_rows))
 
         if all(accepted):
             logger.info("[class %s %s] all resumed, skip.", label, class_name)
@@ -214,19 +363,39 @@ def _worker(
             # ── Step C: 按阈值分流 accepted / rejected ──
             n_acc = 0
             n_rej = 0
+            accepted_rows = []
             for idx, s in zip(valid_indices, clip_scores):
                 last_clip_score[idx] = s
+                score_row = (label, class_name, s, generation_prompts[idx], save_paths[idx])
                 if s >= args.thresh:
+                    score_cache[os.path.abspath(save_paths[idx])] = s
+                    current_img_paths[idx] = save_paths[idx]
                     if examples_dir:
                         gen_records[label].append((generation_prompts[idx], s, save_paths[idx]))
                     accepted[idx] = True
                     n_acc += 1
-                    success_list.append((label, class_name, s, generation_prompts[idx], save_paths[idx]))
+                    success_list.append(score_row)
+                    abs_path = os.path.abspath(save_paths[idx])
+                    if abs_path not in recorded_success_paths:
+                        accepted_rows.append(score_row)
+                        recorded_success_paths.add(abs_path)
                 else:
                     n_rej += 1
-                    logger.warning("[class %s %s]  round %d/%d: desc %d/%d  score:%d rejected: %s",
+                    rejected_path = _move_rejected_image(
+                        save_paths[idx], fail_img_dir, label, round_idx
+                    )
+                    current_img_paths[idx] = rejected_path
+                    logger.warning("[class %s %s]  round %d/%d: desc %d/%d  score:%.4f rejected: %s",
                                    label, class_name, round_idx + 1, args.max_rounds,
                                    idx + 1, n, s ,generation_prompts[idx])
+                    logger.info("[class %s %s] round %d/%d: moved rejected image to %s",
+                                label, class_name, round_idx + 1, args.max_rounds,
+                                rejected_path)
+            _append_rows(success_part_path, csv_header, accepted_rows)
+            if accepted_rows:
+                logger.info("[class %s %s] round %d/%d: appended %d accepted rows to %s",
+                            label, class_name, round_idx + 1, args.max_rounds,
+                            len(accepted_rows), success_part_path)
             logger.info("[class %s %s] round %d/%d: accepted=%d rejected=%d",
                         label, class_name, round_idx + 1, args.max_rounds, n_acc, n_rej)
 
@@ -272,7 +441,7 @@ def _worker(
         # ── 收集失败条目 ──
         for i in range(n):
             if not accepted[i]:
-                fail_list.append((label, class_name, last_clip_score[i], generation_prompts[i], save_paths[i]))
+                fail_list.append((label, class_name, last_clip_score[i], generation_prompts[i], current_img_paths[i]))
 
         # ── 记录最终未通过（满 max_rounds 仍 rejected）的描述 ──
         if failed > 0:
@@ -365,6 +534,11 @@ def main() -> None:
     args = parse_args()
     prompts = load_prompts(args.prompt_file)
     args.reflect_one_prompt = prompts.get("generate", {}).get("reflect_one_prompt")
+    generated_imgs_dir = os.path.abspath(args.data_dir)
+    fail_img_dir = os.path.join(generated_imgs_dir, "fail")
+    if os.path.isdir(fail_img_dir):
+        shutil.rmtree(fail_img_dir)
+        print(f"[generate] Removed stale fail images: {fail_img_dir}")
 
     if args.num_gpus == 0:
         num_gpus = _detect_gpus()
@@ -397,8 +571,9 @@ def main() -> None:
         all_success.extend(s)
         all_fail.extend(f)
 
-    # ── 移动失败图片到 generated_imgs/fail/ ──
-    generated_imgs_dir = os.path.join(args.data_dir, "generated_imgs")
+    # ── 移动失败图片到 data_dir/fail/ ──
+    # args.data_dir is the generated image root, e.g. .../generated_imgs.
+    generated_imgs_dir = os.path.abspath(args.data_dir)
     fail_img_dir = os.path.join(generated_imgs_dir, "fail")
     os.makedirs(fail_img_dir, exist_ok=True)
 
@@ -407,11 +582,29 @@ def main() -> None:
         target_dir = os.path.join(fail_img_dir, str(class_id))
         os.makedirs(target_dir, exist_ok=True)
         target_path = os.path.join(target_dir, os.path.basename(img_path))
-        try:
-            shutil.move(img_path, target_path)
-        except FileNotFoundError:
-            pass
+        if os.path.abspath(img_path) != os.path.abspath(target_path):
+            try:
+                shutil.move(img_path, target_path)
+            except FileNotFoundError:
+                pass
         updated_fail.append((class_id, class_name, clip_score, desc, target_path))
+
+    train_dir = os.path.join(generated_imgs_dir, "train")
+    all_success, missing_success, moved_unknown = _reconcile_train_images(
+        train_dir, fail_img_dir, all_success
+    )
+    if missing_success:
+        print(f"[generate] WARNING: {len(missing_success)} success rows missing image files; omitted from success_list.csv")
+        for class_id, img_path in missing_success[:20]:
+            print(f"[generate] missing success image: class={class_id} path={img_path}")
+        if len(missing_success) > 20:
+            print(f"[generate] ... {len(missing_success) - 20} more missing success images")
+    if moved_unknown:
+        print(f"[generate] Moved {len(moved_unknown)} extra train images to {fail_img_dir}/unknown")
+        for src, dst in moved_unknown[:20]:
+            print(f"[generate] extra train image moved: {src} -> {dst}")
+        if len(moved_unknown) > 20:
+            print(f"[generate] ... {len(moved_unknown) - 20} more extra train images moved")
 
     # ── 写入合并 CSV ──
     header = ['id', 'class_name', 'clip_score', 'description', 'img_path']
@@ -446,10 +639,12 @@ def main() -> None:
         with open(fail_md_path, 'w', encoding='utf-8') as f:
             f.write(f"# Failed Images ({len(updated_fail)})\n\n")
             for k, (cid, cname, score, desc, path) in enumerate(updated_fail, 1):
-                rel = f"images/{cid}/{os.path.basename(path)}"
-                f.write(f"## {k}. class {cid} {cname}\n\n")
-                f.write(f"![Image {k}]({rel})\n\n")
-                f.write(f"**Description:** {desc}\n\n")
+                rel = f"images/{os.path.relpath(path, fail_img_dir)}"
+                f.write(f"## Fail {k}\n\n")
+                f.write(f"**Class ID:** {cid}\n\n")
+                f.write(f"**Class Name:** {cname}\n\n")
+                f.write(f"**Old Description:** {desc}\n\n")
+                f.write(f"![Failed Image {k}]({rel})\n\n")
                 f.write(f"**CLIP Score:** {score:.4f}\n\n---\n\n")
         print(f"[generate] Fail examples -> {fail_md_path}")
 

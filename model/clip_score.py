@@ -6,9 +6,12 @@ CLIP 质量筛选模块
 """
 import torch
 import os
+import logging
 from PIL import Image
 
 from config import CLIP_BACKEND, CLIP_MODEL_NAME
+
+_log = logging.getLogger("clip_score")
 
 
 # ── OpenAI backend ─────────────────────────────────────────────
@@ -24,9 +27,9 @@ def _load_openai():
 
     import clip
     _device = f"cuda:{torch.cuda.current_device()}" if torch.cuda.is_available() else "cpu"
-    print(f"[clip_score] Loading OpenAI CLIP (ViT-B/32) on {_device}...")
+    _log.info("Loading OpenAI CLIP (ViT-B/32) on %s...", _device)
     _openai_model, _openai_preprocess = clip.load("ViT-B/32", device=_device)
-    print("[clip_score] CLIP loaded.")
+    _log.info("CLIP loaded.")
     return _openai_model, _openai_preprocess, _device
 
 
@@ -58,10 +61,10 @@ def _load_hf():
 
     from transformers import CLIPModel, CLIPProcessor
     _device = f"cuda:{torch.cuda.current_device()}" if torch.cuda.is_available() else "cpu"
-    print(f"[clip_score] Loading HF CLIP ({CLIP_MODEL_NAME}) on {_device}...")
+    _log.info("Loading HF CLIP (%s) on %s...", CLIP_MODEL_NAME, _device)
     _hf_model = CLIPModel.from_pretrained(CLIP_MODEL_NAME, local_files_only=True).to(_device)
     _hf_processor = CLIPProcessor.from_pretrained(CLIP_MODEL_NAME, local_files_only=True)
-    print("[clip_score] CLIP loaded.")
+    _log.info("CLIP loaded.")
     return _hf_model, _hf_processor, _device
 
 
@@ -110,7 +113,7 @@ def score(image_path, text):
     else:
         s = _score_openai(image_path, text)
 
-    print(f"[clip_score] {s:.4f}")
+    _log.info("score image=%s text=%r score=%.4f", image_path, text, s)
     return s
 
 
@@ -129,5 +132,12 @@ def score_batch(image_paths, texts):
     else:
         raise ValueError("Batch scoring is only supported for HuggingFace backend")
 
-    print(f"[clip_scores] batch: {[f'{s:.4f}' for s in scores]}")
+    if scores:
+        _log.info(
+            "score_batch n=%d min=%.4f max=%.4f avg=%.4f",
+            len(scores), min(scores), max(scores), sum(scores) / len(scores),
+        )
+        _log.info("score_batch scores=%s", [f"{s:.4f}" for s in scores])
+    else:
+        _log.info("score_batch n=0")
     return scores

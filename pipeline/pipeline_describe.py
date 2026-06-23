@@ -124,7 +124,7 @@ def setup_logger(name, log_path):
     logger.setLevel(logging.INFO)
     if logger.hasHandlers():
         logger.handlers.clear()
-    fh = logging.FileHandler(log_path)
+    fh = logging.FileHandler(log_path, mode="w")
     fh.setFormatter(logging.Formatter(
         "[%(name)s %(asctime)s] %(message)s", datefmt="%H:%M:%S"
     ))

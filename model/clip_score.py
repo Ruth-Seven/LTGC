@@ -7,6 +7,7 @@ CLIP 质量筛选模块
 import torch
 import os
 import logging
+import time
 from PIL import Image
 
 from config import CLIP_BACKEND, CLIP_MODEL_NAME
@@ -108,12 +109,14 @@ def score(image_path, text):
     Returns:
         float: 余弦相似度 (0~1)
     """
+    start = time.perf_counter()
     if CLIP_BACKEND == "huggingface":
         s = _score_hf(image_path, text)
     else:
         s = _score_openai(image_path, text)
+    elapsed = time.perf_counter() - start
 
-    _log.info("score image=%s text=%r score=%.4f", image_path, text, s)
+    _log.info("score image=%s text=%r score=%.4f elapsed=%.3fs", image_path, text, s, elapsed)
     return s
 
 
@@ -127,15 +130,18 @@ def score_batch(image_paths, texts):
     Returns:
         list: 余弦相似度列表 (0~1)
     """
+    start = time.perf_counter()
     if CLIP_BACKEND == "huggingface":
         scores = _score_hf_batch(image_paths, texts)
     else:
         raise ValueError("Batch scoring is only supported for HuggingFace backend")
+    elapsed = time.perf_counter() - start
 
     if scores:
         _log.info(
-            "score_batch n=%d min=%.4f max=%.4f avg=%.4f",
+            "score_batch n=%d min=%.4f max=%.4f avg=%.4f elapsed=%.3fs per_image=%.3fs backend=%s device=%s",
             len(scores), min(scores), max(scores), sum(scores) / len(scores),
+            elapsed, elapsed / len(scores), CLIP_BACKEND, _device,
         )
         _log.info("score_batch scores=%s", [f"{s:.4f}" for s in scores])
     else:

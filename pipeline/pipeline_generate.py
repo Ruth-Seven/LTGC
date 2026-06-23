@@ -277,7 +277,7 @@ def _worker(
     )
 
     for label_idx, (label, texts) in enumerate(class_list):
-        class_start = time.time()
+        class_start = time.perf_counter()
         class_name = _class_name(label)
         train_dir = os.path.join(args.data_dir, "train")
         dir_path = os.path.join(train_dir, str(label))
@@ -286,9 +286,12 @@ def _worker(
         generation_prompts = [
             str(t).strip() if not pd.isna(t) and str(t).strip() else f'A photo of a {class_name}' for t in texts
         ]
+        
         clip_prompt = f'A photo of a {class_name}'
         n = len(generation_prompts)
         save_paths = [os.path.join(dir_path, _hash_filename(label, generation_prompts[i])) for i in range(n)]
+        # insert style prompt after generate path hash
+        generation_prompts = [t + args.generate_pic_style for t in generation_prompts]
         if args.onepath:
             save_paths = [os.path.join(args.data_dir, 'gen_train-onepath.JPEG')] * n
         current_img_paths = save_paths[:]
@@ -301,6 +304,7 @@ def _worker(
         # ── 断点续传：检查已有图片 ──
         resumed = 0
         resumed_rows = []
+        resume_start = time.perf_counter()
         for i in range(n):
             if os.path.exists(save_paths[i]):
                 accepted[i] = True
@@ -315,12 +319,17 @@ def _worker(
                 if examples_dir:
                     gen_records[label].append((generation_prompts[i], cached_score, save_paths[i]))
                 resumed += 1
+        resume_elapsed = time.perf_counter() - resume_start
+        shard_resume_write_start = time.perf_counter()
         _append_rows(success_part_path, csv_header, resumed_rows)
+        shard_resume_write_elapsed = time.perf_counter() - shard_resume_write_start
         if resumed > 0:
             logger.info("[class %s %s] resumed %d/%d from existing images",
                         label, class_name, resumed, n)
             logger.info("[class %s %s] wrote %d resumed rows to shard success CSV",
                         label, class_name, len(resumed_rows))
+            logger.info("[class %s %s] timing resume_check=%.3fs shard_success_write=%.3fs",
+                        label, class_name, resume_elapsed, shard_resume_write_elapsed)
 
         if all(accepted):
             logger.info("[class %s %s] all resumed, skip.", label, class_name)
@@ -328,7 +337,7 @@ def _worker(
 
         bs = args.batch
         for round_idx in range(args.max_rounds):
-            round_start = time.time()
+            round_start = time.perf_counter()
             pending = [i for i in range(n) if not accepted[i]]
             if not pending:
                 logger.info("[class %s %s] round %d/%d: all accepted, done.",
@@ -339,6 +348,7 @@ def _worker(
             logger.info("[class %s %s] round %d/%d: generating %d images...",
                         label, class_name, round_idx + 1, args.max_rounds, len(pending))
             img_paths_map = {}
+            sd_start = time.perf_counter()
             for chunk_start in range(0, len(pending), bs):
                 chunk_end = min(chunk_start + bs, len(pending))
                 chunk_idx_slice = pending[chunk_start:chunk_end]
@@ -349,6 +359,7 @@ def _worker(
                     if p is not None:
                         img_paths_map[i] = p
             unload_sd()
+            sd_elapsed = time.perf_counter() - sd_start
 
             valid_indices = sorted(img_paths_map.keys())
             if not valid_indices:
@@ -358,9 +369,12 @@ def _worker(
 
             # ── Step B: CLIP 全量评分 ──
             valid_paths = [img_paths_map[i] for i in valid_indices]
+            clip_start = time.perf_counter()
             clip_scores = score_batch(valid_paths, [clip_prompt] * len(valid_paths))
+            clip_elapsed = time.perf_counter() - clip_start
 
             # ── Step C: 按阈值分流 accepted / rejected ──
+            split_start = time.perf_counter()
             n_acc = 0
             n_rej = 0
             accepted_rows = []
@@ -391,7 +405,10 @@ def _worker(
                     logger.info("[class %s %s] round %d/%d: moved rejected image to %s",
                                 label, class_name, round_idx + 1, args.max_rounds,
                                 rejected_path)
+            split_elapsed = time.perf_counter() - split_start
+            shard_write_start = time.perf_counter()
             _append_rows(success_part_path, csv_header, accepted_rows)
+            shard_write_elapsed = time.perf_counter() - shard_write_start
             if accepted_rows:
                 logger.info("[class %s %s] round %d/%d: appended %d accepted rows to %s",
                             label, class_name, round_idx + 1, args.max_rounds,
@@ -400,9 +417,11 @@ def _worker(
                         label, class_name, round_idx + 1, args.max_rounds, n_acc, n_rej)
 
             # ── Step D: 批量反思低分描述（LLM 加载一次，逐个 reflect）──
+            refine_elapsed = 0.0
             if round_idx < args.max_rounds - 1:
                 rejected = [i for i in range(n) if not accepted[i]]
                 if rejected:
+                    refine_start = time.perf_counter()
                     n_refined = 0
                     for i in rejected:
                         refined = reflect_one_description(
@@ -426,6 +445,15 @@ def _worker(
                     logger.info("[class %s %s] round %d/%d: refined %d/%d descriptions.",
                                 label, class_name, round_idx + 1, args.max_rounds,
                                 n_refined, len(rejected))
+                    refine_elapsed = time.perf_counter() - refine_start
+
+            round_elapsed = time.perf_counter() - round_start
+            logger.info(
+                "[class %s %s] round %d/%d timing total=%.3fs sd_generate=%.3fs clip_score=%.3fs split_move=%.3fs shard_success_write=%.3fs refine=%.3fs valid_images=%d",
+                label, class_name, round_idx + 1, args.max_rounds,
+                round_elapsed, sd_elapsed, clip_elapsed, split_elapsed,
+                shard_write_elapsed, refine_elapsed, len(valid_indices),
+            )
 
             if all(accepted):
                 logger.info("[class %s %s] round %d/%d: all accepted.",
@@ -433,7 +461,7 @@ def _worker(
                 break
 
         failed = sum(1 for a in accepted if not a)
-        elapsed = time.time() - class_start
+        elapsed = time.perf_counter() - class_start
         class_times.append((label, class_name, elapsed, n, failed))
         logger.info("[class %s %s] done: %d/%d accepted, %d failed | elapsed %.1fs",
                     label, class_name, n - failed, n, failed, elapsed)
@@ -531,9 +559,12 @@ def _detect_gpus() -> int:
 
 def main() -> None:
     from utils import load_prompts
+    import time
+    main_start = time.perf_counter()
     args = parse_args()
     prompts = load_prompts(args.prompt_file)
     args.reflect_one_prompt = prompts.get("generate", {}).get("reflect_one_prompt")
+    args.generate_pic_style = prompts.get("generate", {}).get("generate_pic_style")
     generated_imgs_dir = os.path.abspath(args.data_dir)
     fail_img_dir = os.path.join(generated_imgs_dir, "fail")
     if os.path.isdir(fail_img_dir):
@@ -545,9 +576,12 @@ def main() -> None:
     else:
         num_gpus = args.num_gpus
 
+    load_csv_start = time.perf_counter()
     df = pd.read_csv(args.extended_description_path, header=None, names=['label', 'text'])
     grouped = sorted(df.groupby('label')['text'].apply(list).items())
+    load_csv_elapsed = time.perf_counter() - load_csv_start
 
+    worker_start = time.perf_counter()
     if num_gpus <= 1:
         s, f = _worker(0, 1, [grouped], args, args.examples_dir)
         results = [(s, f)]
@@ -563,13 +597,16 @@ def main() -> None:
         results = [result_queue.get() for _ in range(num_gpus)]
 
         print(f"[generate] All GPUs done.")
+    worker_elapsed = time.perf_counter() - worker_start
 
     # ── 合并所有 worker 的 success / fail 列表 ──
+    merge_start = time.perf_counter()
     all_success = []
     all_fail = []
     for s, f in results:
         all_success.extend(s)
         all_fail.extend(f)
+    merge_elapsed = time.perf_counter() - merge_start
 
     # ── 移动失败图片到 data_dir/fail/ ──
     # args.data_dir is the generated image root, e.g. .../generated_imgs.
@@ -578,6 +615,7 @@ def main() -> None:
     os.makedirs(fail_img_dir, exist_ok=True)
 
     updated_fail = []
+    move_fail_start = time.perf_counter()
     for class_id, class_name, clip_score, desc, img_path in all_fail:
         target_dir = os.path.join(fail_img_dir, str(class_id))
         os.makedirs(target_dir, exist_ok=True)
@@ -588,11 +626,14 @@ def main() -> None:
             except FileNotFoundError:
                 pass
         updated_fail.append((class_id, class_name, clip_score, desc, target_path))
+    move_fail_elapsed = time.perf_counter() - move_fail_start
 
     train_dir = os.path.join(generated_imgs_dir, "train")
+    reconcile_start = time.perf_counter()
     all_success, missing_success, moved_unknown = _reconcile_train_images(
         train_dir, fail_img_dir, all_success
     )
+    reconcile_elapsed = time.perf_counter() - reconcile_start
     if missing_success:
         print(f"[generate] WARNING: {len(missing_success)} success rows missing image files; omitted from success_list.csv")
         for class_id, img_path in missing_success[:20]:
@@ -607,6 +648,7 @@ def main() -> None:
             print(f"[generate] ... {len(moved_unknown) - 20} more extra train images moved")
 
     # ── 写入合并 CSV ──
+    write_csv_start = time.perf_counter()
     header = ['id', 'class_name', 'clip_score', 'description', 'img_path']
     os.makedirs(generated_imgs_dir, exist_ok=True)
 
@@ -621,13 +663,16 @@ def main() -> None:
         writer = csv.writer(f)
         writer.writerow(header)
         writer.writerows(updated_fail)
+    write_csv_elapsed = time.perf_counter() - write_csv_start
 
     print(f"[generate] Success: {len(all_success)}, Fail: {len(updated_fail)}")
     print(f"[generate] Merged lists -> {generated_imgs_dir}/")
     print(f"[generate] Fail images moved to {fail_img_dir}")
 
     # ── 生成 fail examples (单文件) ──
+    fail_examples_elapsed = 0.0
     if args.examples_dir and updated_fail:
+        fail_examples_start = time.perf_counter()
         fail_examples_dir = os.path.join(args.examples_dir, "fail")
         os.makedirs(fail_examples_dir, exist_ok=True)
 
@@ -647,6 +692,20 @@ def main() -> None:
                 f.write(f"![Failed Image {k}]({rel})\n\n")
                 f.write(f"**CLIP Score:** {score:.4f}\n\n---\n\n")
         print(f"[generate] Fail examples -> {fail_md_path}")
+        fail_examples_elapsed = time.perf_counter() - fail_examples_start
+
+    total_elapsed = time.perf_counter() - main_start
+    print(
+        "[generate] timing "
+        f"total={total_elapsed:.3f}s "
+        f"load_csv={load_csv_elapsed:.3f}s "
+        f"workers={worker_elapsed:.3f}s "
+        f"merge_results={merge_elapsed:.3f}s "
+        f"move_fail={move_fail_elapsed:.3f}s "
+        f"reconcile_train={reconcile_elapsed:.3f}s "
+        f"write_csv={write_csv_elapsed:.3f}s "
+        f"fail_examples={fail_examples_elapsed:.3f}s"
+    )
 
 
 if __name__ == "__main__":

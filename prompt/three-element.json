@@ -9,6 +9,7 @@
         "system_prompt": "You are a helpful assistant that generates diverse and detailed image descriptions for image classification datasets."
     },
     "generate": {
-        "reflect_one_prompt": "From the description above, please regenerate a better description for '{name}'. The sentence must describe a different [distinctive feature] (e.g., texture, shape) or a [specific scene] (e.g., lighting, environment) to ensure diversity. Avoid near-duplicates. Must using the Template:\n'A photo of {name} [doing/done], with [distinctive features], in [specific scenes].'\n"
+        "reflect_one_prompt": "From the description above, please regenerate a better description for '{name}'. The sentence must describe a different [distinctive feature] (e.g., texture, shape) or a [specific scene] (e.g., lighting, environment) to ensure diversity. Avoid near-duplicates. Must using the Template:\n'A photo of {name} [doing/done], with [distinctive features], in [specific scenes].'\n",
+        "generate_pic_style": " , natural lighting, detailed skin texture, realistic proportions, candid moment, shallow depth of field, shot on a 50mm lens, soft background blur, high detail, photorealistic, documentary photography"
     }
 }

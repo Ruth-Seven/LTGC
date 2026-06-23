@@ -223,7 +223,7 @@ def reflect_one_description(description, class_name, prompt, enable_thinking=Tru
     if not result:
         _log.warning("reflect_one_description: no valid descriptions generated, returning empty string. Prompt: %s\nOriginal response was:\n%s\n\n", prompt, response)
         return ""
-    _log.warning("reflect_one_description: regenerate a description: %s", result)
+    _log.warning("reflect_one_description: %s. \n regenerate a description: %s", description, result)
     return result
 
 

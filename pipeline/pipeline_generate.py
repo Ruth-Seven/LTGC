@@ -394,7 +394,7 @@ def _worker(
                     if abs_path not in recorded_success_paths:
                         accepted_rows.append(score_row)
                         recorded_success_paths.add(abs_path)
-                    logger.info("[class %s %s]  round %d/%d: desc %d/%d [accpepted] score:%.4f prompt:%s path: %s\n",
+                    logger.info("[class %s %s]  round %d/%d: desc %d/%d [accpepted] score:%.4f \nprompt:%s \npath: %s\n",
                                    label, class_name, round_idx + 1, args.max_rounds,
                                    idx + 1, n, s ,generation_prompts[idx], save_paths[idx])
                 else:
@@ -403,7 +403,7 @@ def _worker(
                         save_paths[idx], fail_img_dir, label, round_idx
                     )
                     current_img_paths[idx] = rejected_path
-                    logger.warning("[class %s %s]  round %d/%d: desc %d/%d  score:%.4f rejected: %s \n move to: %s",
+                    logger.warning("[class %s %s]  round %d/%d: desc %d/%d  score:%.4f rejected: \n prompt: %s \n move to: %s",
                                    label, class_name, round_idx + 1, args.max_rounds,
                                    idx + 1, n, s ,generation_prompts[idx],rejected_path)
             split_elapsed = time.perf_counter() - split_start

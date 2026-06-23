@@ -59,7 +59,6 @@ SD_MODEL_ID = "runwayml/stable-diffusion-v1-5"
 SD_IMAGE_SIZE = 1024
 SD_NUM_INFERENCE_STEPS = 30
 SD_GUIDANCE_SCALE = 7.5
-SD_STYLE_SUFFIX = ", 8k, photorealistic, dslr, ultra detailed, professional photography, natural lighting"
 
 # ============================================================
 # 数据路径配置

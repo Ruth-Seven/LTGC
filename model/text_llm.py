@@ -119,7 +119,7 @@ def extend_descriptions(existing_texts, prompt, number, enable_thinking=False, m
     sentences = re.split(r'\n\d+[\.\)]\s*|\n-\s*|\n', response)
     result = []
     for s in sentences:
-        s = s.strip()
+        s = re.sub(r'^\d+[\.\)]\s*', '', s.strip())
         if s.startswith('A photo'):
             s = s.split('\n')[0].strip()
             if s and s.count('[') == 0 and s.count(']') == 0:
@@ -177,7 +177,7 @@ def reflection_descriptions(texts, prompt, number, enable_thinking=True, max_tok
     sentences = re.split(r'\n\d+[\.\)]\s*|\n-\s*|\n', response)
     result = []
     for s in sentences:
-        s = s.strip()
+        s = re.sub(r'^\d+[\.\)]\s*', '', s.strip())
         if s.startswith('A photo'):
             s = s.split('\n')[0].strip()
             result.append(s)

@@ -89,10 +89,12 @@ def _extend_worker(rank, world_size, class_chunks, max_generate_num,
             label, class_name, idx + 1, total, n_existing, max_generate_num,
         )
 
-        # 每条 existing desc 扩展 1条
+        if n_existing == 0:
+            logger.warning("[class %s %s] no existing descriptions, skip", label, class_name)
+            continue
+
         per_text = 1
         all_new = []
-        #随机抽取texts直到满足上限要求
         random_texts = []
         while len(random_texts) < max_generate_num:
             random_texts.append(texts[randint(0, n_existing - 1)])

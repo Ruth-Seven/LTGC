@@ -38,7 +38,7 @@ VLM_TOP_P = 0.9
 # ============================================================
 
 # local llm 配置
-TEXT_LLM_MODEL_ID = "Qwen/Qwen3-8B"
+TEXT_LLM_MODEL_ID = "/data/hujunjie/models/Qwen3-8B"
 TEXT_LLM_MAX_TOKENS = 10000
 TEXT_LLM_TEMPERATURE = 0.8
 

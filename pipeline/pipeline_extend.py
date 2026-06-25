@@ -111,6 +111,11 @@ def _extend_worker(rank, world_size, class_chunks, max_generate_num,
             # 质量过滤
             unique_raw = list(dict.fromkeys(raw))
             fresh = [d for d in unique_raw if validate_description(d, class_name)]
+            # check duplication
+            for f in fresh:
+                if f in all_new:
+                    logger.warnning("[class %s %s] desc %d/%d duplicate with previous, skip: %s",
+                        label, class_name, ti + 1, n_existing, f)
 
             reflect_list = []
             if fresh:

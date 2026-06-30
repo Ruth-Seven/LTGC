@@ -10,6 +10,7 @@ import hashlib
 import shutil
 import argparse
 import logging
+import faulthandler
 from typing import Optional, Any
 import pandas as pd
 from collections import defaultdict
@@ -50,6 +51,10 @@ def setup_logger(name: str, log_path: str) -> logging.Logger:
     logger = logging.getLogger(name)
     logger.setLevel(logging.INFO)
     fh = logging.FileHandler(log_path, mode="w")
+    try:
+        faulthandler.enable(file=fh.stream, all_threads=True)
+    except Exception:
+        pass
     fh.setFormatter(logging.Formatter(
         "[%(name)s %(asctime)s] %(message)s", datefmt="%H:%M:%S"
     ))
@@ -121,6 +126,34 @@ def _load_recorded_paths(path: str) -> set[str]:
             if img_path:
                 paths.add(os.path.abspath(img_path))
     return paths
+
+
+def _load_worker_csv(path: str) -> list[tuple]:
+    """Load worker result rows from disk instead of passing large lists through mp.Queue."""
+    if not os.path.exists(path):
+        return []
+    rows = []
+    with open(path, newline="", encoding="utf-8") as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            if not row:
+                continue
+            try:
+                label: Any = int(row.get("id", ""))
+            except ValueError:
+                label = row.get("id", "")
+            try:
+                clip_score = float(row.get("clip_score", 0.0))
+            except ValueError:
+                clip_score = 0.0
+            rows.append((
+                label,
+                row.get("class_name", ""),
+                clip_score,
+                row.get("description", ""),
+                row.get("img_path", ""),
+            ))
+    return rows
 
 
 def _move_rejected_image(img_path: str, fail_img_dir: str, label: Any,
@@ -212,6 +245,41 @@ def save_generation_markdown(records: list[tuple[str, str, str, float]], output_
             f.write(f"**CLIP Score:** {clip_score:.4f}  \n\n")
             f.write("---\n\n")
     print(f"[save_generation_markdown] Examples saved to {md_path}")
+
+
+def _ensure_relative_symlink(link_path: str, target_dir: str) -> None:
+    """Create a relative symlink for Markdown assets if it is absent."""
+    os.makedirs(os.path.dirname(link_path), exist_ok=True)
+    rel_target = os.path.relpath(os.path.abspath(target_dir), os.path.dirname(link_path))
+    if os.path.islink(link_path):
+        if os.readlink(link_path) != rel_target:
+            os.unlink(link_path)
+            os.symlink(rel_target, link_path)
+        return
+    if not os.path.exists(link_path):
+        os.symlink(rel_target, link_path)
+
+
+def _write_class_generation_markdown(
+    examples_dir: str,
+    data_dir: str,
+    label: Any,
+    class_name: str,
+    records: list[tuple[str, float, str]],
+) -> None:
+    """Write per-class generated image examples with links rooted at examples_dir/images."""
+    os.makedirs(examples_dir, exist_ok=True)
+    _ensure_relative_symlink(os.path.join(examples_dir, "images"), data_dir)
+    safe_name = class_name.replace(' ', '_').replace('/', '_')
+    md_path = os.path.join(examples_dir, f"{label}_{safe_name}.md")
+    with open(md_path, 'w', encoding='utf-8') as f:
+        f.write(f"\n## Generated Images ({len(records)})\n\n")
+        for k, (desc, score, img_path) in enumerate(records, 1):
+            img_rel = f"images/{os.path.relpath(img_path, data_dir)}"
+            f.write(f"### Image {k}\n\n")
+            f.write(f"![Image {k}]({img_rel})\n\n")
+            f.write(f"**Description:** {desc}\n\n")
+            f.write(f"**CLIP Score:** {score:.4f}\n\n")
 
 
 def _worker(
@@ -333,6 +401,11 @@ def _worker(
                         label, class_name, resume_elapsed, shard_resume_write_elapsed)
 
         if all(accepted):
+            if examples_dir and gen_records.get(label):
+                _write_class_generation_markdown(
+                    examples_dir, args.data_dir, label, class_name, gen_records[label]
+                )
+                gen_records.pop(label)
             logger.info("[class %s %s] all resumed, skip.", label, class_name)
             continue
 
@@ -492,35 +565,18 @@ def _worker(
 
         # ── 写入 Markdown ──
         if examples_dir and gen_records.get(label):
-            os.makedirs(examples_dir, exist_ok=True)
-            safe_name = class_name.replace(' ', '_').replace('/', '_')
-            md_path = os.path.join(examples_dir, f"{label}_{safe_name}.md")
-            records = gen_records[label]
-            with open(md_path, 'w') as f:
-                f.write(f"\n## Generated Images ({len(records)})\n\n")
-                for k, (desc, score, img_path) in enumerate(records, 1):
-                    img_rel = f"images/{os.path.relpath(img_path, args.data_dir)}"
-                    f.write(f"### Image {k}\n\n")
-                    f.write(f"![Image {k}]({img_rel})\n\n")
-                    f.write(f"**Description:** {desc}\n\n")
-                    f.write(f"**CLIP Score:** {score:.4f}\n\n")
+            _write_class_generation_markdown(
+                examples_dir, args.data_dir, label, class_name, gen_records[label]
+            )
             gen_records.pop(label)
 
     if examples_dir and gen_records:
         # ── 刷出剩余记录（如 onepath 模式下残留的）──
         for label, records in gen_records.items():
             class_name = _class_name(label)
-            safe_name = class_name.replace(' ', '_').replace('/', '_')
-            md_path = os.path.join(examples_dir, f"{label}_{safe_name}.md")
-            os.makedirs(examples_dir, exist_ok=True)
-            with open(md_path, 'w') as f:
-                f.write(f"\n## Generated Images ({len(records)})\n\n")
-                for k, (desc, score, img_path) in enumerate(records, 1):
-                    img_rel = f"images/{os.path.relpath(img_path, args.data_dir)}"
-                    f.write(f"### Image {k}\n\n")
-                    f.write(f"![Image {k}]({img_rel})\n\n")
-                    f.write(f"**Description:** {desc}\n\n")
-                    f.write(f"**CLIP Score:** {score:.4f}\n\n")
+            _write_class_generation_markdown(
+                examples_dir, args.data_dir, label, class_name, records
+            )
 
     logger.info("Done. %d classes processed.", total)
 
@@ -559,6 +615,10 @@ def _detect_gpus() -> int:
 
 
 def main() -> None:
+    try:
+        faulthandler.enable(all_threads=True)
+    except Exception:
+        pass
     from utils import load_prompts
     import time
     main_start = time.perf_counter()
@@ -592,10 +652,15 @@ def main() -> None:
         for i, item in enumerate(grouped):
             chunks[i % num_gpus].append(item)
 
-        result_queue = mp.Queue()
-        mp.spawn(_worker, args=(num_gpus, chunks, args, args.examples_dir, result_queue),
+        mp.spawn(_worker, args=(num_gpus, chunks, args, args.examples_dir, None),
                  nprocs=num_gpus, join=True)
-        results = [result_queue.get() for _ in range(num_gpus)]
+        results = [
+            (
+                _load_worker_csv(os.path.join(args.log_dir, f"success_gpu{rank}.csv")),
+                _load_worker_csv(os.path.join(args.log_dir, f"fail_gpu{rank}.csv")),
+            )
+            for rank in range(num_gpus)
+        ]
 
         print(f"[generate] All GPUs done.")
     worker_elapsed = time.perf_counter() - worker_start
@@ -678,8 +743,7 @@ def main() -> None:
         os.makedirs(fail_examples_dir, exist_ok=True)
 
         fail_images_link = os.path.join(fail_examples_dir, "images")
-        if not os.path.exists(fail_images_link):
-            os.symlink(os.path.relpath(fail_img_dir, fail_examples_dir), fail_images_link)
+        _ensure_relative_symlink(fail_images_link, fail_img_dir)
 
         fail_md_path = os.path.join(fail_examples_dir, "failed_examples.md")
         with open(fail_md_path, 'w', encoding='utf-8') as f:

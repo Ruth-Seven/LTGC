@@ -56,7 +56,7 @@ def _get_class_name(label, class_map):
     return _imagenet_class_name(int(label)).split(", ")[0]
 
 
-def _extend_worker(rank, world_size, class_chunks, max_generate_num,
+def _extend_worker(rank, world_size, class_chunks, max_generate_num, fixed_number,
                    output_base, log_dir, class_map, examples_dir,
                    ext_prompt, det_prompt, ref_prompt):
     import torch as _torch
@@ -84,9 +84,10 @@ def _extend_worker(rank, world_size, class_chunks, max_generate_num,
     for idx, (label, texts) in enumerate(class_list):
         class_name = _get_class_name(label, class_map)
         n_existing = len(texts)
+        target_num = fixed_number if fixed_number is not None else max_generate_num
         logger.info(
-            "[class %s %s] %d/%d start: existing=%d target=%d",
-            label, class_name, idx + 1, total, n_existing, max_generate_num,
+            "[class %s %s] %d/%d start: existing=%d target=%d fixed=%s",
+            label, class_name, idx + 1, total, n_existing, target_num, fixed_number is not None,
         )
 
         if n_existing == 0:
@@ -94,12 +95,15 @@ def _extend_worker(rank, world_size, class_chunks, max_generate_num,
             continue
 
         per_text = 1
+        max_attempts = max_generate_num
+        if fixed_number is not None:
+            max_attempts = max(max_generate_num, fixed_number * 3)
         all_new = []
-        random_texts = []
-        while len(random_texts) < max_generate_num:
-            random_texts.append(texts[randint(0, n_existing - 1)])
-        #对random_texts中的每条文本进行扩展、反思和验证
-        for ti, text in enumerate(random_texts):
+        # 对随机抽取的文本进行扩展、反思和验证。fixed_number 模式会补生成到目标数量或达到尝试上限。
+        for ti in range(max_attempts):
+            if fixed_number is not None and len(dict.fromkeys(all_new)) >= target_num:
+                break
+            text = texts[randint(0, n_existing - 1)]
             raw = extend_descriptions(
                 [text],
                 prompt=ext_prompt.format(number=per_text, name=class_name),
@@ -115,7 +119,7 @@ def _extend_worker(rank, world_size, class_chunks, max_generate_num,
             for f in fresh:
                 if f in all_new:
                     logger.warning("[class %s %s] desc %d/%d duplicate with previous, skip: %s",
-                        label, class_name, ti + 1, n_existing, f)
+                        label, class_name, ti + 1, max_attempts, f)
 
             reflect_list = []
             if fresh:
@@ -152,27 +156,34 @@ def _extend_worker(rank, world_size, class_chunks, max_generate_num,
             logger.info("")
             logger.info(
                 "[class %s %s] desc %d/%d summary: raw=%d unique=%d fresh=%d reflected=%d",
-                label, class_name, ti + 1, n_existing,
+                label, class_name, ti + 1, max_attempts,
                 len(raw), len(unique_raw), len(fresh), len(reflected),
             )
             for desc_idx, desc in enumerate(raw, 1):
                 logger.info(
                     "[class %s %s] desc %d/%d raw %d. %s",
-                    label, class_name, ti + 1, n_existing, desc_idx, desc,
+                    label, class_name, ti + 1, max_attempts, desc_idx, desc,
                 )
             for desc_idx, desc in enumerate(fresh, 1):
                 logger.info(
                     "[class %s %s] desc %d/%d fresh %d. %s",
-                    label, class_name, ti + 1, n_existing, desc_idx, desc,
+                    label, class_name, ti + 1, max_attempts, desc_idx, desc,
                 )
             for desc_idx, desc in enumerate(reflected, 1):
                 logger.info(
                     "[class %s %s] desc %d/%d reflected %d. %s",
-                    label, class_name, ti + 1, n_existing, desc_idx, desc,
+                    label, class_name, ti + 1, max_attempts, desc_idx, desc,
                 )
             all_new.extend(reflected)
 
         all_new = list(dict.fromkeys(all_new))  # 全局去重
+        if fixed_number is not None:
+            if len(all_new) < target_num:
+                logger.warning(
+                    "[class %s %s] fixed_number target not reached: output=%d target=%d attempts=%d",
+                    label, class_name, len(all_new), target_num, max_attempts,
+                )
+            all_new = all_new[:target_num]
         logger.info("")
         logger.info(
             "[class %s %s] done: output=%d after class-level dedup",
@@ -234,7 +245,9 @@ def parse_args():
                         default=os.path.join(DESCRIPTIONS_DIR, 'existing_description_list.csv'),
                         help='Input descriptions CSV')
     parser.add_argument('-m', '--max_generate_num', default=50, type=int,
-                        help='Max descriptions per class')
+                        help='Max generation attempts per class, or descriptions per class when --fix-number is not set')
+    parser.add_argument('--fix-number', '--fix_number', dest='fixed_number', default=None, type=int,
+                        help='Generate a fixed number of extended descriptions per class when possible')
     parser.add_argument('-ext', '--extended_description_path',
                         default=os.path.join(DESCRIPTIONS_DIR, 'extended_description.csv'),
                         help='Output extended CSV')
@@ -254,6 +267,8 @@ def parse_args():
 def main():
     global extension_prompt, determine_prompt, reflection_prompt
     args = parse_args()
+    if args.fixed_number is not None and args.fixed_number <= 0:
+        raise ValueError("--fix-number must be a positive integer")
     prompts = load_prompts(args.prompt_file)
 
     ext_cfg = prompts.get("extend", {})
@@ -283,7 +298,7 @@ def main():
 
     num_gpus = args.num_gpus
     if num_gpus <= 1:
-        _extend_worker(0, 1, [grouped], args.max_generate_num,
+        _extend_worker(0, 1, [grouped], args.max_generate_num, args.fixed_number,
                        args.extended_description_path, args.log_dir, class_map,
                        args.examples_dir,
                        extension_prompt, determine_prompt, reflection_prompt)
@@ -294,7 +309,7 @@ def main():
     for i, item in enumerate(grouped):
         chunks[i % num_gpus].append(item)
 
-    mp.spawn(_extend_worker, args=(num_gpus, chunks, args.max_generate_num,
+    mp.spawn(_extend_worker, args=(num_gpus, chunks, args.max_generate_num, args.fixed_number,
              args.extended_description_path, args.log_dir, class_map,
              args.examples_dir,
              extension_prompt, determine_prompt, reflection_prompt),

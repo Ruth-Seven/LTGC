@@ -47,7 +47,7 @@ TEXT_LLM_TEMPERATURE = 0.8
 # ============================================================
 CLIP_BACKEND="huggingface"    # "openai" (原生clip库) 或 "huggingface" (transformers)
 # CLIP_MODEL_NAME="openai/clip-vit-base-patch32"
-CLIP_MODEL_NAME="openai/clip-vit-large-patch14"
+CLIP_MODEL_NAME="/data/hujunjie/models/clip-vit-large-patch14"
 CLIP_MAX_TOKENS = 77 - 2
 # ============================================================
 # Stable Diffusion 配置

@@ -1,15 +1,18 @@
 {
-    "describe": {
-        "vlm_prompt": "Please use the Template to briefly describe the image of {name} in only one sentence. Template:\n'A photo of {name} [doing/done], with [distinctive features], in [specific scenes].'\n"
-    },
-    "extend": {
-        "extension_prompt": "Besides these descriptions mentioned above, please use the Template 1 to list exactly {number} other possible [doing/done], [distinctive features] and [specific scenes].\nTemplate1: A photo of {name} [doing/done], [with distinctive features] in [specific scenes]. \nList the selected sentences numbered from 1 to {number}, one per line. Do not output more than {number} descriptions.",
-        "determine_prompt": "From the provided description list, determine which sentences are unrealistic or reduce diversity. Output one 1-based sequence number per line for every sentence that needs reflection. Do not output anything else. If all sentences are good, return 'apple'.",
-        "reflection_prompt": "From the provided description list, please select exactly {number} unique sentences for  '{name}'. \nEach sentence must describe a different [doing/done], [distinctive feature] (e.g., texture, shape) or a [specific scene] (e.g., lighting, environment) to ensure diversity. Avoid near-duplicates.\nList the selected sentences numbered from 1 to {number}, one per line. Do not output more than {number} descriptions.",
-        "system_prompt": "You are a helpful assistant that generates diverse and detailed image descriptions for image classification datasets."
-    },
-    "generate": {
-        "reflect_one_prompt": "From the description above, please regenerate a better description for '{name}'. The sentence must describe a different [distinctive feature] (e.g., texture, shape) or a [specific scene] (e.g., lighting, environment) to ensure diversity. Avoid near-duplicates. Must using the Template:\n'A photo of {name} [doing/done], with [distinctive features], in [specific scenes].'\n",
-        "generate_pic_style": " , natural lighting, detailed skin texture, realistic proportions, candid moment, shallow depth of field, shot on a 50mm lens, soft background blur, high detail, photorealistic, documentary photography"
-    }
+  "disambiguate": {
+    "prompt": "Inspect the parent category of the reference images of '{class_name}'. Output exactly one word category. Never output as same as input. Never use vague categories such as object, item, thing, entity, miscellaneous, or product. Output no labels, arrows, or explanations. Examples show the format: elephant\n mammal"
+  },
+  "describe": {
+    "vlm_prompt": "Describe the image in exactly one realistic sentence using '{name} ({category})'.Output only the sentence. Ignore plural forms of class names and category. Dont change orignal class name and (category). \n\nexample: A photo of European fire salamander (amphibian) resting on damp moss, with black skin and vivid yellow markings, in a shaded forest scene.\n \nUse this form: A photo of a {name} ({category}) [doing/done], with [distinctive features], in [specific scene]. "
+  },
+  "extend": {
+    "extension_prompt": "Generate exactly {number} new realistic descriptions for '{name} ({category})'. Every sentence must contain the literal text '{name} ({category})' unchanged. Do not repeat any supplied description, and vary your descriptions with different [doing/done], [distinctive features], and [specific scene].\n\nReturn a numbered list from 1 to {number}.  Output only the sentence for each list item. Use this form: A photo of a {name} ({category}) [doing/done], with [distinctive features], in [specific scene].",
+    "determine_prompt": "From the provided description list, determine which sentences are unrealistic or reduce diversity. Output one 1-based sequence number per line for every sentence that needs reflection. Do not output anything else. If all sentences are good, return 'apple'.",
+    "reflection_prompt": "Rewrite exactly {number} supplied descriptions for the complete class semantics '{name} ({category})'. Every result must contain the literal text '{name} ({category})' unchanged, remain photorealistic and plausible, and be distinct from the supplied descriptions and from every other result.\n\nOne-shot example:\nClass semantics: European fire salamander (amphibian)\nOutput:\n1. A photo of a European fire salamander (amphibian) emerging beside a shallow stream, with bright yellow patches on smooth black skin, in natural overcast light.\n\nReturn a numbered list.  Output only the sentence for each list item. Use this form: A photo of a {name} ({category}) [doing/done], with [distinctive features], in [specific scene]. ",
+    "system_prompt": "You generate diverse, realistic image descriptions for image-classification datasets and follow exact output formats."
+  },
+  "generate": {
+    "reflect_one_prompt": "Rewrite the description as one realistic sentence for the complete class semantics '{name} ({category})'. The literal text '{name} ({category})' must remain unchanged. Use the form: A photo of a {name} ({category}) [doing/done], with [distinctive features], in [specific scene]. Output only the sentence.",
+    "generate_pic_style": ", photorealistic, natural lighting, realistic appearance"
+  }
 }

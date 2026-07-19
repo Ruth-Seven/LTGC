@@ -89,6 +89,16 @@ def _strip_thinking(response: str) -> str:
     return re.sub(r"<think>.*?</think>", "", response, flags=re.DOTALL).strip()
 
 
+def _parse_numbered_lines(response: str):
+    """Strip only line-leading list markers; preserve content hyphens."""
+    result = []
+    for line in _strip_thinking(response).splitlines():
+        text = re.sub(r"^\s*(?:\d+[.)]\s*|-\s+)", "", line).strip()
+        if text:
+            result.append(text)
+    return result
+
+
 # ── Dispatch ───────────────────────────────────────────────────
 
 def _generate(messages, max_tokens=TEXT_LLM_MAX_TOKENS,
@@ -116,7 +126,7 @@ def extend_descriptions(existing_texts, prompt, number, enable_thinking=False, m
         enable_thinking=enable_thinking,
     )
 
-    sentences = re.split(r'\n\d+[\.\)]\s*|-\s*|\n|^\d+[\.\)]\s*', response)
+    sentences = _parse_numbered_lines(response)
     result = []
     for s in sentences:
         s = s.strip()
@@ -174,7 +184,7 @@ def reflection_descriptions(texts, prompt, number, enable_thinking=True, max_tok
     )
     _log.info(f"reflection: {len(texts)} existing → raw response {len(response)} chars")
 
-    sentences = re.split(r'\n\d+[\.\)]\s*|- \s*|-\s*|\n|^\d+[\.\)]\s*', response)
+    sentences = _parse_numbered_lines(response)
     result = []
     for s in sentences:
         s = s.strip()
@@ -199,8 +209,11 @@ def reflect_one_description(description, class_name, prompt, enable_thinking=Tru
     """
     if prompt is None:
         raise Exception("reflect_one_description Empty.")
+    match = re.match(r"^\s*(.+?)\s*\(([^()]+)\)\s*$", class_name)
+    if not match:
+        raise ValueError(f"class_name must use name (category): {class_name!r}")
     user_content = description + "\n" + prompt.format(
-        name=class_name,
+        name=match.group(1).strip(), category=match.group(2).strip(),
     )
     messages = [
         {"role": "system", "content": SYSTEM_PROMPT},

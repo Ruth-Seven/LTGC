@@ -8,6 +8,48 @@ import os
 import re
 
 
+SEMANTIC_LABEL_RE = re.compile(r"^\s*(?P<name>.+?)\s*\((?P<category>[^()]+)\)\s*$")
+
+
+def parse_semantic_label(value):
+    """Parse the canonical ``name (category)`` class representation."""
+    if not isinstance(value, str):
+        raise ValueError("semantic label must be a string")
+    match = SEMANTIC_LABEL_RE.match(value)
+    if not match:
+        raise ValueError(f"invalid semantic label: {value!r}")
+    name = match.group("name").strip()
+    category = match.group("category").strip()
+    if not name or not category:
+        raise ValueError(f"invalid semantic label: {value!r}")
+    return name, category, f"{name} ({category})"
+
+
+def load_class_semantics(path, required_labels=None):
+    if not path or not os.path.exists(path):
+        raise FileNotFoundError(f"class semantic mapping not found: {path}")
+    with open(path, encoding="utf-8") as f:
+        raw = json.load(f)
+    result = {}
+    for key, value in raw.items():
+        _, _, display = parse_semantic_label(value)
+        result[str(key)] = display
+    if required_labels is not None:
+        missing = sorted(str(x) for x in required_labels if str(x) not in result)
+        if missing:
+            raise ValueError(f"class semantic mapping missing {len(missing)} labels: {missing[:20]}")
+    return result
+
+
+def atomic_json_dump(data, path):
+    os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2, sort_keys=True)
+        f.write("\n")
+    os.replace(tmp, path)
+
+
 def count_samples(dataloader, output_path=None):
     """统计数据加载器中各类别样本数，保存到文件"""
     class_counts = Counter()
@@ -100,7 +142,7 @@ def load_prompts(prompt_file=None):
         raise FileNotFoundError(f"Prompt file not found: {path}")
     with open(path, 'r') as f:
         data = json.load(f)
-    for section in ("describe", "extend", "generate"):
+    for section in ("disambiguate", "describe", "extend", "generate"):
         if section not in data:
             data[section] = {}
     return data

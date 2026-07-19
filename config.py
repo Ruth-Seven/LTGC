@@ -24,13 +24,14 @@ if _env_file.exists():
 
 
 # ============================================================
-# 本地 VLM 配置（LLaVA / Qwen2-VL 双后端）
+# 本地 VLM 配置（LLaVA / Qwen2-VL / Qwen3-VL）
 # ============================================================
 LLAVA_MODEL_ID = "/data/model/llava-hf_llava-1.5-7b-hf"
 QWEN2VL_MODEL_ID = "/data/hujunjie/models/Qwen2-VL-7B-Instruct"
-LOCAL_VLM_ID = QWEN2VL_MODEL_ID
+QWEN3VL_MODEL_ID = "/data/hujunjie/models/Qwen3-VL-8B-Instruct"
+LOCAL_VLM_ID = QWEN3VL_MODEL_ID
 VLM_MAX_TOKENS = 200
-VLM_TEMPERATURE = 0.7
+VLM_TEMPERATURE = 0.4
 VLM_TOP_P = 0.9
 
 # ============================================================

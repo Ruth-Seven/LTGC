@@ -7,6 +7,7 @@ import os
 import sys
 import csv
 import hashlib
+import random
 import shutil
 import argparse
 import logging
@@ -19,7 +20,7 @@ import torch.multiprocessing as mp
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from config import DATA_DIR, EXTENDED_DESCRIPTION_PATH
-from utils import validate_description
+from utils import atomic_json_dump, validate_description, load_class_semantics, parse_semantic_label
 
 
 def parse_args() -> argparse.Namespace:
@@ -30,6 +31,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument('-d', '--data_dir', default=DATA_DIR, help='Output root')
     parser.add_argument('-t', '--thresh', default=0.28, type=float, help='CLIP score threshold')
     parser.add_argument('-r', '--max_rounds', default=5, type=int, help='Max retry rounds')
+    parser.add_argument('--target-num', default=100, type=int,
+                        help='Required accepted images per class')
+    parser.add_argument('--max-sample-attempts', default=1000, type=int,
+                        help='Maximum sampled description candidates per class')
     parser.add_argument('-m', '--md', default=None, nargs='?', const="/tmp/gen_examples",
                         help='Markdown example records dir')
     parser.add_argument('-o', '--onepath', action='store_true', help='Save all images to same path')
@@ -71,9 +76,9 @@ def setup_logger(name: str, log_path: str) -> logging.Logger:
     return logger
 
 
-def _hash_filename(label, description: str) -> str:
-    h = hashlib.md5(description.encode()).hexdigest()[:12]
-    return f"{label}_{h}.JPEG"
+def _hash_filename(label, description: str, attempt_id: int = 0) -> str:
+    h = hashlib.md5(f"{attempt_id}\0{description}".encode()).hexdigest()[:12]
+    return f"{label}_{attempt_id:04d}_{h}.JPEG"
 
 
 def _append_rows(path: str, header: list[str], rows: list[tuple]) -> None:
@@ -89,43 +94,44 @@ def _append_rows(path: str, header: list[str], rows: list[tuple]) -> None:
         writer.writerows(rows)
 
 
-def _load_success_score_cache(data_dir: str) -> dict[str, float]:
-    """Load per-image CLIP scores from prior full or sharded success CSVs."""
-    import glob
+def _write_rows_atomic(path: str, header: list[str], rows: list[tuple]) -> None:
+    """Atomically replace a CSV, including its header."""
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    tmp_path = f"{path}.tmp.{os.getpid()}"
+    with open(tmp_path, "w", newline="", encoding="utf-8") as f:
+        writer = csv.writer(f)
+        writer.writerow(header)
+        writer.writerows(rows)
+    os.replace(tmp_path, path)
 
-    cache = {}
-    root = os.path.abspath(data_dir)
-    paths = [os.path.join(root, "success_list.csv")]
-    paths.extend(sorted(glob.glob(os.path.join(root, "parts", "success_gpu*.csv"))))
-    for path in paths:
-        if not os.path.exists(path):
+
+def _deduplicate_success_rows(rows: list[tuple]) -> list[tuple]:
+    """Keep one success row per concrete image path."""
+    unique = []
+    seen_paths = set()
+    for row in rows:
+        path = os.path.abspath(row[4])
+        if path in seen_paths:
             continue
-        with open(path, newline="", encoding="utf-8") as f:
-            reader = csv.DictReader(f)
-            for row in reader:
-                img_path = row.get("img_path")
-                score = row.get("clip_score")
-                if not img_path or score in (None, ""):
-                    continue
-                try:
-                    cache[os.path.abspath(img_path)] = float(score)
-                except ValueError:
-                    continue
-    return cache
+        seen_paths.add(path)
+        unique.append(row)
+    return unique
 
 
-def _load_recorded_paths(path: str) -> set[str]:
-    """Load image paths already recorded in a sharded CSV."""
-    if not os.path.exists(path):
-        return set()
-    paths = set()
-    with open(path, newline="", encoding="utf-8") as f:
-        reader = csv.DictReader(f)
-        for row in reader:
-            img_path = row.get("img_path")
-            if img_path:
-                paths.add(os.path.abspath(img_path))
-    return paths
+def _validate_success_counts(
+    rows: list[tuple], expected_labels: list[str], target_num: int,
+) -> tuple[dict[str, int], list[str]]:
+    counts = defaultdict(int)
+    for row in rows:
+        counts[str(row[0])] += 1
+    expected = set(expected_labels)
+    incomplete = {
+        label: counts.get(label, 0)
+        for label in expected_labels
+        if counts.get(label, 0) != target_num
+    }
+    unexpected = sorted(set(counts) - expected)
+    return incomplete, unexpected
 
 
 def _load_worker_csv(path: str) -> list[tuple]:
@@ -306,11 +312,7 @@ def _worker(
     from data_txt.imagenet_label_mapping import get_readable_name as _imagenet_class_name
 
     # ── 类别名映射（支持自定义 JSON mapping）──
-    _class_map = None
-    if args.class_mapping and os.path.exists(args.class_mapping):
-        import json
-        with open(args.class_mapping) as f:
-            _class_map = json.load(f)
+    _class_map = load_class_semantics(args.class_mapping)
 
     def _class_name(label: int) -> str:
         if _class_map is not None:
@@ -338,11 +340,22 @@ def _worker(
     parts_dir = os.path.join(generated_imgs_dir, "parts")
     csv_header = ['id', 'class_name', 'clip_score', 'description', 'img_path']
     success_part_path = os.path.join(parts_dir, f"success_gpu{rank}.csv")
-    score_cache = _load_success_score_cache(generated_imgs_dir)
-    recorded_success_paths = _load_recorded_paths(success_part_path)
+    prior_success_by_label = defaultdict(list)
+    prior_success_paths = set()
+    for row in _load_worker_csv(success_part_path):
+        abs_path = os.path.abspath(row[4])
+        if (
+            row[2] >= args.thresh
+            and os.path.exists(abs_path)
+            and abs_path not in prior_success_paths
+        ):
+            prior_success_by_label[str(row[0])].append(row)
+            prior_success_paths.add(abs_path)
+    recorded_success_paths = set(prior_success_paths)
+    incomplete_classes = {}
     logger.info(
-        "Resume cache loaded: %d scored success images; shard success already has %d rows at %s",
-        len(score_cache), len(recorded_success_paths), success_part_path,
+        "Resume cache loaded: %d valid accepted images from %s",
+        len(recorded_success_paths), success_part_path,
     )
 
     for label_idx, (label, texts) in enumerate(class_list):
@@ -352,206 +365,199 @@ def _worker(
         dir_path = os.path.join(train_dir, str(label))
         os.makedirs(dir_path, exist_ok=True)
 
-        generation_prompts = [
+        source_descriptions = [
             str(t).strip() if not pd.isna(t) and str(t).strip() else f'A photo of a {class_name}' for t in texts
         ]
-        
-        clip_prompt = f'A photo of a {class_name}'
-        n = len(generation_prompts)
-        save_paths = [os.path.join(dir_path, _hash_filename(label, generation_prompts[i])) for i in range(n)]
-        # insert style prompt after generate path hash
-        generation_prompts = [t + args.generate_pic_style for t in generation_prompts]
-        if args.onepath:
-            save_paths = [os.path.join(args.data_dir, 'gen_train-onepath.JPEG')] * n
-        current_img_paths = save_paths[:]
-
-        accepted = [False] * n
-        last_clip_score = [0.0] * n
-        logger.info("[class %s %s] %d descs, thresh=%.2f, max_rounds=%d",
-                    label, class_name, n, args.thresh, args.max_rounds)
-
-        # ── 断点续传：检查已有图片 ──
-        resumed = 0
-        resumed_rows = []
-        resume_start = time.perf_counter()
-        for i in range(n):
-            if os.path.exists(save_paths[i]):
-                accepted[i] = True
-                cached_score = score_cache.get(os.path.abspath(save_paths[i]), -1.0)
-                last_clip_score[i] = cached_score
-                row = (label, class_name, cached_score, generation_prompts[i], save_paths[i])
-                success_list.append(row)
-                abs_path = os.path.abspath(save_paths[i])
-                if abs_path not in recorded_success_paths:
-                    resumed_rows.append(row)
-                    recorded_success_paths.add(abs_path)
-                if examples_dir:
-                    gen_records[label].append((generation_prompts[i], cached_score, save_paths[i]))
-                resumed += 1
-        resume_elapsed = time.perf_counter() - resume_start
-        shard_resume_write_start = time.perf_counter()
-        _append_rows(success_part_path, csv_header, resumed_rows)
-        shard_resume_write_elapsed = time.perf_counter() - shard_resume_write_start
-        if resumed > 0:
-            logger.info("[class %s %s] resumed %d/%d from existing images",
-                        label, class_name, resumed, n)
-            logger.info("[class %s %s] wrote %d resumed rows to shard success CSV",
-                        label, class_name, len(resumed_rows))
-            logger.info("[class %s %s] timing resume_check=%.3fs shard_success_write=%.3fs",
-                        label, class_name, resume_elapsed, shard_resume_write_elapsed)
-
-        if all(accepted):
-            if examples_dir and gen_records.get(label):
-                _write_class_generation_markdown(
-                    examples_dir, args.data_dir, label, class_name, gen_records[label]
-                )
-                gen_records.pop(label)
-            logger.info("[class %s %s] all resumed, skip.", label, class_name)
+        source_descriptions = [t for t in source_descriptions if t]
+        if not source_descriptions:
+            logger.error("[class %s %s] empty description pool", label, class_name)
+            incomplete_classes[str(label)] = 0
             continue
 
-        bs = args.batch
-        for round_idx in range(args.max_rounds):
-            round_start = time.perf_counter()
-            pending = [i for i in range(n) if not accepted[i]]
-            if not pending:
-                logger.info("[class %s %s] round %d/%d: all accepted, done.",
-                            label, class_name, round_idx + 1, args.max_rounds)
-                break
+        clip_prompt = f'A photo of a {class_name}'
+        target_num = args.target_num
+        class_success_rows = prior_success_by_label.get(str(label), [])[:target_num]
+        success_list.extend(class_success_rows)
+        for row in class_success_rows:
+            if examples_dir:
+                gen_records[label].append((row[3], row[2], row[4]))
 
-            # ── Step A: SD 批量生成图像（SDXL 加载一次，分 chunk 生成）──
-            logger.info("[class %s %s] round %d/%d: generating %d images...",
-                        label, class_name, round_idx + 1, args.max_rounds, len(pending))
-            img_paths_map = {}
-            sd_start = time.perf_counter()
-            for chunk_start in range(0, len(pending), bs):
-                chunk_end = min(chunk_start + bs, len(pending))
-                chunk_idx_slice = pending[chunk_start:chunk_end]
-                batch_prompts = [generation_prompts[i] for i in chunk_idx_slice]
-                batch_paths = [save_paths[i] for i in chunk_idx_slice]
-                chunk_paths = generate_batch(batch_prompts, batch_paths)
-                for i, p in zip(chunk_idx_slice, chunk_paths):
-                    if p is not None:
-                        img_paths_map[i] = p
-            unload_sd()
-            sd_elapsed = time.perf_counter() - sd_start
+        class_success = len(class_success_rows)
+        sampled_candidates = 0
+        candidate_serial = class_success
+        draw_queue = []
+        logger.info(
+            "[class %s %s] pool=%d resumed=%d target=%d thresh=%.2f max_rounds=%d max_samples=%d",
+            label, class_name, len(source_descriptions), class_success, target_num,
+            args.thresh, args.max_rounds, args.max_sample_attempts,
+        )
 
-            valid_indices = sorted(img_paths_map.keys())
-            if not valid_indices:
-                logger.warning("[class %s %s] round %d/%d: no valid images generated.",
-                               label, class_name, round_idx + 1, args.max_rounds)
-                break
+        def draw_description() -> str:
+            if not draw_queue:
+                draw_queue.extend(source_descriptions)
+                random.shuffle(draw_queue)
+            return draw_queue.pop()
 
-            # ── Step B: CLIP 全量评分 ──
-            valid_paths = [img_paths_map[i] for i in valid_indices]
-            clip_start = time.perf_counter()
-            clip_scores = score_batch(valid_paths, [clip_prompt] * len(valid_paths))
-            clip_elapsed = time.perf_counter() - clip_start
+        while class_success < target_num and sampled_candidates < args.max_sample_attempts:
+            candidate_n = min(
+                target_num - class_success,
+                args.max_sample_attempts - sampled_candidates,
+            )
+            base_prompts = [draw_description() for _ in range(candidate_n)]
+            generation_prompts = [text + args.generate_pic_style for text in base_prompts]
+            save_paths = []
+            for text in base_prompts:
+                candidate_serial += 1
+                path = os.path.join(
+                    dir_path, _hash_filename(label, text, candidate_serial)
+                )
+                save_paths.append(_unique_path(path))
+            current_img_paths = save_paths[:]
+            accepted = [False] * candidate_n
+            last_clip_score = [0.0] * candidate_n
+            sampled_candidates += candidate_n
 
-            # ── Step C: 按阈值分流 accepted / rejected ──
-            split_start = time.perf_counter()
-            n_acc = 0
-            n_rej = 0
-            accepted_rows = []
-            for idx, s in zip(valid_indices, clip_scores):
-                last_clip_score[idx] = s
-                score_row = (label, class_name, s, generation_prompts[idx], save_paths[idx])
-                if s >= args.thresh:
-                    score_cache[os.path.abspath(save_paths[idx])] = s
-                    current_img_paths[idx] = save_paths[idx]
-                    if examples_dir:
-                        gen_records[label].append((generation_prompts[idx], s, save_paths[idx]))
-                    accepted[idx] = True
-                    n_acc += 1
-                    success_list.append(score_row)
-                    abs_path = os.path.abspath(save_paths[idx])
-                    if abs_path not in recorded_success_paths:
-                        accepted_rows.append(score_row)
-                        recorded_success_paths.add(abs_path)
-                    logger.info("[class %s %s]  round %d/%d: desc %d/%d [accpepted] score:%.4f \nprompt:%s \npath: %s\n",
-                                   label, class_name, round_idx + 1, args.max_rounds,
-                                   idx + 1, n, s ,generation_prompts[idx], save_paths[idx])
-                else:
-                    n_rej += 1
-                    rejected_path = _move_rejected_image(
-                        save_paths[idx], fail_img_dir, label, round_idx
-                    )
-                    current_img_paths[idx] = rejected_path
-                    logger.warning("[class %s %s]  round %d/%d: desc %d/%d  score:%.4f rejected: \n prompt: %s \n move to: %s",
-                                   label, class_name, round_idx + 1, args.max_rounds,
-                                   idx + 1, n, s ,generation_prompts[idx],rejected_path)
-            split_elapsed = time.perf_counter() - split_start
-            shard_write_start = time.perf_counter()
-            _append_rows(success_part_path, csv_header, accepted_rows)
-            shard_write_elapsed = time.perf_counter() - shard_write_start
-            if accepted_rows:
-                logger.info("[class %s %s] round %d/%d: appended %d accepted rows to %s",
-                            label, class_name, round_idx + 1, args.max_rounds,
-                            len(accepted_rows), success_part_path)
-            logger.info("[class %s %s] round %d/%d: accepted=%d rejected=%d",
-                        label, class_name, round_idx + 1, args.max_rounds, n_acc, n_rej)
-
-            # ── Step D: 批量反思低分描述（LLM 加载一次，逐个 reflect）──
-            refine_elapsed = 0.0
-            if round_idx < args.max_rounds - 1:
-                rejected = [i for i in range(n) if not accepted[i]]
-                if rejected:
-                    refine_start = time.perf_counter()
-                    n_refined = 0
-                    for i in rejected:
-                        refined = reflect_one_description(
-                            generation_prompts[i], class_name,
-                            prompt=args.reflect_one_prompt,
-                            enable_thinking=False, do_sample=False,
-                            temperature=0.2, max_token=100)
-                        if not refined:
-                            logger.warning("[class %s %s] round %d/%d: refined an empty description",
-                                           label, class_name, round_idx + 1, args.max_rounds)
-                            continue
-                        if refined and validate_description(refined, class_name):
-                            generation_prompts[i] = refined
-                            n_refined += 1
-                            logger.info("[class %s %s] round %d/%d: refined: %s",
-                                        label, class_name, round_idx + 1, args.max_rounds, refined)
-                        else:
-                            logger.warning("[class %s %s] round %d/%d: fail to validate refined dst: %s",
-                                           label, class_name, round_idx + 1, args.max_rounds, refined)
-                    unload_text_llm()
-                    logger.info("[class %s %s] round %d/%d: refined %d/%d descriptions.",
-                                label, class_name, round_idx + 1, args.max_rounds,
-                                n_refined, len(rejected))
-                    refine_elapsed = time.perf_counter() - refine_start
-
-            round_elapsed = time.perf_counter() - round_start
             logger.info(
-                "[class %s %s] round %d/%d timing total=%.3fs sd_generate=%.3fs clip_score=%.3fs split_move=%.3fs shard_success_write=%.3fs refine=%.3fs valid_images=%d",
-                label, class_name, round_idx + 1, args.max_rounds,
-                round_elapsed, sd_elapsed, clip_elapsed, split_elapsed,
-                shard_write_elapsed, refine_elapsed, len(valid_indices),
+                "[class %s %s] refill: success=%d/%d sampled=%d/%d candidates=%d",
+                label, class_name, class_success, target_num,
+                sampled_candidates, args.max_sample_attempts, candidate_n,
             )
 
-            if all(accepted):
-                logger.info("[class %s %s] round %d/%d: all accepted.",
-                            label, class_name, round_idx + 1, args.max_rounds)
-                break
+            bs = args.batch
+            for round_idx in range(args.max_rounds):
+                round_start = time.perf_counter()
+                pending = [i for i in range(candidate_n) if not accepted[i]]
+                if not pending:
+                    break
 
-        failed = sum(1 for a in accepted if not a)
+                logger.info("[class %s %s] round %d/%d: generating %d images...",
+                            label, class_name, round_idx + 1, args.max_rounds, len(pending))
+                img_paths_map = {}
+                sd_start = time.perf_counter()
+                for chunk_start in range(0, len(pending), bs):
+                    chunk_idx_slice = pending[chunk_start:chunk_start + bs]
+                    batch_prompts = [generation_prompts[i] for i in chunk_idx_slice]
+                    batch_paths = [save_paths[i] for i in chunk_idx_slice]
+                    chunk_paths = generate_batch(batch_prompts, batch_paths)
+                    for i, path in zip(chunk_idx_slice, chunk_paths):
+                        if path is not None:
+                            img_paths_map[i] = path
+                unload_sd()
+                sd_elapsed = time.perf_counter() - sd_start
+
+                valid_indices = sorted(img_paths_map)
+                if not valid_indices:
+                    logger.warning("[class %s %s] round %d/%d: no valid images generated.",
+                                   label, class_name, round_idx + 1, args.max_rounds)
+                    break
+
+                valid_paths = [img_paths_map[i] for i in valid_indices]
+                clip_start = time.perf_counter()
+                clip_scores = score_batch(valid_paths, [clip_prompt] * len(valid_paths))
+                clip_elapsed = time.perf_counter() - clip_start
+
+                split_start = time.perf_counter()
+                n_acc = 0
+                n_rej = 0
+                accepted_rows = []
+                for idx, clip_value in zip(valid_indices, clip_scores):
+                    last_clip_score[idx] = clip_value
+                    score_row = (
+                        label, class_name, clip_value,
+                        generation_prompts[idx], save_paths[idx],
+                    )
+                    if clip_value >= args.thresh:
+                        current_img_paths[idx] = save_paths[idx]
+                        accepted[idx] = True
+                        n_acc += 1
+                        class_success += 1
+                        class_success_rows.append(score_row)
+                        success_list.append(score_row)
+                        if examples_dir:
+                            gen_records[label].append((
+                                generation_prompts[idx], clip_value, save_paths[idx]
+                            ))
+                        abs_path = os.path.abspath(save_paths[idx])
+                        if abs_path not in recorded_success_paths:
+                            accepted_rows.append(score_row)
+                            recorded_success_paths.add(abs_path)
+                    else:
+                        n_rej += 1
+                        rejected_path = _move_rejected_image(
+                            save_paths[idx], fail_img_dir, label, round_idx
+                        )
+                        current_img_paths[idx] = rejected_path
+                split_elapsed = time.perf_counter() - split_start
+
+                shard_write_start = time.perf_counter()
+                _append_rows(success_part_path, csv_header, accepted_rows)
+                shard_write_elapsed = time.perf_counter() - shard_write_start
+                logger.info(
+                    "[class %s %s] round %d/%d: accepted=%d rejected=%d total=%d/%d",
+                    label, class_name, round_idx + 1, args.max_rounds,
+                    n_acc, n_rej, class_success, target_num,
+                )
+
+                refine_elapsed = 0.0
+                if round_idx < args.max_rounds - 1:
+                    rejected = [i for i in range(candidate_n) if not accepted[i]]
+                    if rejected:
+                        refine_start = time.perf_counter()
+                        n_refined = 0
+                        for i in rejected:
+                            refined = reflect_one_description(
+                                generation_prompts[i], class_name,
+                                prompt=args.reflect_one_prompt,
+                                enable_thinking=False, do_sample=False,
+                                temperature=0.2, max_token=100,
+                            )
+                            if refined and validate_description(refined, class_name):
+                                generation_prompts[i] = refined
+                                n_refined += 1
+                        unload_text_llm()
+                        logger.info(
+                            "[class %s %s] round %d/%d: refined %d/%d descriptions.",
+                            label, class_name, round_idx + 1, args.max_rounds,
+                            n_refined, len(rejected),
+                        )
+                        refine_elapsed = time.perf_counter() - refine_start
+
+                round_elapsed = time.perf_counter() - round_start
+                logger.info(
+                    "[class %s %s] round %d/%d timing total=%.3fs sd_generate=%.3fs clip_score=%.3fs split_move=%.3fs shard_success_write=%.3fs refine=%.3fs valid_images=%d",
+                    label, class_name, round_idx + 1, args.max_rounds,
+                    round_elapsed, sd_elapsed, clip_elapsed, split_elapsed,
+                    shard_write_elapsed, refine_elapsed, len(valid_indices),
+                )
+
+            batch_failed = sum(1 for value in accepted if not value)
+            for i in range(candidate_n):
+                if not accepted[i]:
+                    fail_list.append((
+                        label, class_name, last_clip_score[i],
+                        generation_prompts[i], current_img_paths[i],
+                    ))
+            if batch_failed:
+                with open(failed_descs_path, 'a') as fd:
+                    fd.write(
+                        f"\n[class {label} {class_name}] {batch_failed}/{candidate_n} "
+                        f"candidate failures after {args.max_rounds} rounds; "
+                        f"success={class_success}/{target_num}:\n"
+                    )
+                    for i in range(candidate_n):
+                        if not accepted[i]:
+                            fd.write(f"  [{i}] {generation_prompts[i]}\n")
+
+        failed = target_num - class_success
         elapsed = time.perf_counter() - class_start
-        class_times.append((label, class_name, elapsed, n, failed))
-        logger.info("[class %s %s] done: %d/%d accepted, %d failed | elapsed %.1fs",
-                    label, class_name, n - failed, n, failed, elapsed)
-
-        # ── 收集失败条目 ──
-        for i in range(n):
-            if not accepted[i]:
-                fail_list.append((label, class_name, last_clip_score[i], generation_prompts[i], current_img_paths[i]))
-
-        # ── 记录最终未通过（满 max_rounds 仍 rejected）的描述 ──
+        class_times.append((label, class_name, elapsed, target_num, failed))
+        logger.info(
+            "[class %s %s] done: %d/%d accepted, sampled=%d, missing=%d | elapsed %.1fs",
+            label, class_name, class_success, target_num,
+            sampled_candidates, failed, elapsed,
+        )
         if failed > 0:
-            with open(failed_descs_path, 'a') as fd:
-                fd.write(f"\n[class {label} {class_name}] {failed}/{n} failed after {args.max_rounds} rounds:\n")
-                for i in range(n):
-                    if not accepted[i]:
-                        fd.write(f"  [{i}] {generation_prompts[i]}\n")
+            incomplete_classes[str(label)] = class_success
 
         # ── ETA 预估 ──
         if class_times:
@@ -585,17 +591,19 @@ def _worker(
     fail_path = os.path.join(args.log_dir, f"fail_gpu{rank}.csv")
     header = ['id', 'class_name', 'clip_score', 'description', 'img_path']
 
-    with open(success_path, 'w', newline='', encoding='utf-8') as f:
-        writer = csv.writer(f)
-        writer.writerow(header)
-        writer.writerows(success_list)
+    success_list = _deduplicate_success_rows(success_list)
+    _write_rows_atomic(success_path, header, success_list)
+    _write_rows_atomic(success_part_path, header, success_list)
     logger.info("Written success list: %d entries to %s", len(success_list), success_path)
 
-    with open(fail_path, 'w', newline='', encoding='utf-8') as f:
-        writer = csv.writer(f)
-        writer.writerow(header)
-        writer.writerows(fail_list)
+    _write_rows_atomic(fail_path, header, fail_list)
     logger.info("Written fail list: %d entries to %s", len(fail_list), fail_path)
+
+    incomplete_path = os.path.join(args.log_dir, f"incomplete_gpu{rank}.json")
+    if incomplete_classes:
+        atomic_json_dump(incomplete_classes, incomplete_path)
+    elif os.path.exists(incomplete_path):
+        os.remove(incomplete_path)
 
     if result_queue is not None:
         result_queue.put((success_list, fail_list))
@@ -623,9 +631,19 @@ def main() -> None:
     import time
     main_start = time.perf_counter()
     args = parse_args()
+    if args.target_num <= 0:
+        raise ValueError("--target-num must be positive")
+    if args.max_rounds <= 0:
+        raise ValueError("--max-rounds must be positive")
+    if args.max_sample_attempts < args.target_num:
+        raise ValueError("--max-sample-attempts must be at least --target-num")
+    if args.onepath and args.target_num > 1:
+        raise ValueError("--onepath is incompatible with target-num greater than 1")
     prompts = load_prompts(args.prompt_file)
     args.reflect_one_prompt = prompts.get("generate", {}).get("reflect_one_prompt")
-    args.generate_pic_style = prompts.get("generate", {}).get("generate_pic_style")
+    args.generate_pic_style = prompts.get("generate", {}).get("generate_pic_style") or ""
+    if not args.reflect_one_prompt:
+        raise ValueError("prompt file is missing generate.reflect_one_prompt")
     generated_imgs_dir = os.path.abspath(args.data_dir)
     fail_img_dir = os.path.join(generated_imgs_dir, "fail")
     if os.path.isdir(fail_img_dir):
@@ -640,6 +658,7 @@ def main() -> None:
     load_csv_start = time.perf_counter()
     df = pd.read_csv(args.extended_description_path, header=None, names=['label', 'text'])
     grouped = sorted(df.groupby('label')['text'].apply(list).items())
+    load_class_semantics(args.class_mapping, [label for label, _ in grouped])
     load_csv_elapsed = time.perf_counter() - load_csv_start
 
     worker_start = time.perf_counter()
@@ -672,6 +691,7 @@ def main() -> None:
     for s, f in results:
         all_success.extend(s)
         all_fail.extend(f)
+    all_success = _deduplicate_success_rows(all_success)
     merge_elapsed = time.perf_counter() - merge_start
 
     # ── 移动失败图片到 data_dir/fail/ ──
@@ -713,22 +733,37 @@ def main() -> None:
         if len(moved_unknown) > 20:
             print(f"[generate] ... {len(moved_unknown) - 20} more extra train images moved")
 
-    # ── 写入合并 CSV ──
+    expected_labels = [str(label) for label, _ in grouped]
+    incomplete, unexpected_labels = _validate_success_counts(
+        all_success, expected_labels, args.target_num
+    )
+    if unexpected_labels:
+        raise RuntimeError(f"Step3 has unexpected success labels: {unexpected_labels[:20]}")
+
+    # ── 写入合并 CSV；只有全部类别完整时发布正式 success_list.csv ──
     write_csv_start = time.perf_counter()
     header = ['id', 'class_name', 'clip_score', 'description', 'img_path']
     os.makedirs(generated_imgs_dir, exist_ok=True)
 
     success_merged_path = os.path.join(generated_imgs_dir, "success_list.csv")
-    with open(success_merged_path, 'w', newline='', encoding='utf-8') as f:
-        writer = csv.writer(f)
-        writer.writerow(header)
-        writer.writerows(all_success)
+    success_partial_path = os.path.join(generated_imgs_dir, "success_list.partial.csv")
+    incomplete_path = os.path.join(generated_imgs_dir, "incomplete.json")
+    if incomplete:
+        _write_rows_atomic(success_partial_path, header, all_success)
+        atomic_json_dump({
+            "target_num": args.target_num,
+            "counts": incomplete,
+        }, incomplete_path)
+        if os.path.exists(success_merged_path):
+            os.remove(success_merged_path)
+    else:
+        _write_rows_atomic(success_merged_path, header, all_success)
+        for stale_path in (success_partial_path, incomplete_path):
+            if os.path.exists(stale_path):
+                os.remove(stale_path)
 
     fail_merged_path = os.path.join(generated_imgs_dir, "fail_list.csv")
-    with open(fail_merged_path, 'w', newline='', encoding='utf-8') as f:
-        writer = csv.writer(f)
-        writer.writerow(header)
-        writer.writerows(updated_fail)
+    _write_rows_atomic(fail_merged_path, header, updated_fail)
     write_csv_elapsed = time.perf_counter() - write_csv_start
 
     print(f"[generate] Success: {len(all_success)}, Fail: {len(updated_fail)}")
@@ -771,6 +806,10 @@ def main() -> None:
         f"write_csv={write_csv_elapsed:.3f}s "
         f"fail_examples={fail_examples_elapsed:.3f}s"
     )
+    if incomplete:
+        raise RuntimeError(
+            f"Step3 incomplete for {len(incomplete)} classes; report: {incomplete_path}"
+        )
 
 
 if __name__ == "__main__":

@@ -1,530 +1,249 @@
-"""
-LTGC 流水线 - Step 1: 图像描述生成
-读取尾部类图像 → LLaVA 生成描述 → 保存 CSV
-
---num_gpus N：多卡数据并行 (DistributedSampler 自动分片，N worker 各占 1 GPU)
-"""
-import os
-import sys
-import re
-import json
-import csv
+"""LTGC Step 1: sample real images per class and generate one description each."""
 import argparse
-import time
+import csv
+import hashlib
+import json
 import logging
+import os
+import random
+import re
+import sys
+from collections import defaultdict
+
 import torch
-import torch.distributed as dist
 import torch.multiprocessing as mp
-from torch.utils.data import DataLoader, DistributedSampler
+from PIL import Image
 from torchvision import transforms
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from config import IMAGENET_DIR, DESCRIPTIONS_DIR, CLASS_COUNT_FILE
-from data.data_loader import ImageNetLTDataset, SUPPORTED_EXTENSIONS
-from data_txt.imagenet_label_mapping import get_readable_name
+from data.data_loader import ImageNetLTDataset
 from model.vision_lmm import describe_image_batch, set_backend
-from utils import cleanup_stale_parts, load_prompts, _photo_check, validate_description
-from collections import defaultdict, Counter
+from utils import atomic_json_dump, load_class_semantics, load_prompts, parse_semantic_label, validate_description
 
 
-def collate_no_stack(batch):
-    """不堆叠 image tensor，保持 list 以支持不同尺寸的图片"""
-    images = [item[0] for item in batch]
-    targets = torch.tensor([item[1] for item in batch])
-    indices = torch.tensor([item[2] for item in batch])
-    return images, targets, indices
+MAX_IMAGE_EDGE = 1024
+LEADING_SEMANTIC_LABEL_RE = re.compile(
+    r"^(?P<prefix>\s*A photo of\s+(?:an?\s+)?)"
+    r"(?P<label>[^.\n]*?\([^()\n]+\))"
+    r"(?P<suffix>.*)$",
+    re.IGNORECASE,
+)
 
 
-MAX_DESCRIBE_RETRIES = 3
+def _resize_for_vlm(image, max_edge=MAX_IMAGE_EDGE):
+    """Downscale oversized images while preserving aspect ratio; never upscale."""
+    width, height = image.size
+    longest_edge = max(width, height)
+    if longest_edge <= max_edge:
+        return image
+    scale = max_edge / longest_edge
+    resized_size = (
+        max(1, round(width * scale)),
+        max(1, round(height * scale)),
+    )
+    return image.resize(resized_size, Image.Resampling.LANCZOS)
 
 
-def _describe_with_retry(group_imgs, name, logger, vlm_prompt):
-    results = [""] * len(group_imgs)
-    failed_attempts = {}  # {image_idx: [rejected_desc, ...]}
-
-    for attempt in range(MAX_DESCRIBE_RETRIES):
-        pending = [(i, group_imgs[i]) for i, r in enumerate(results) if not r]
-        if not pending:
-            break
-
-        p_indices, p_imgs = zip(*pending) if pending else ([], [])
-        p_indices = list(p_indices)
-        p_imgs = list(p_imgs)
-
-        prompts = [vlm_prompt.format(name=name)] * len(p_imgs)
-        batch_results = describe_image_batch(p_imgs, prompts)
-
-        for idx, desc in zip(p_indices, batch_results):
-            if not desc:
-                continue
-            desc = desc.strip().strip("'\"")
-            if not validate_description(desc, name):
-                logger.info("[VLM rejected] class=%s: %s", name, desc)
-                failed_attempts.setdefault(idx, []).append(desc)
-                continue
-            logger.info("[VLM output] class=%s: %s", name, desc)
-            results[idx] = desc
-
-        still_failed = sum(1 for r in results if not r)
-        if still_failed == 0:
-            break
-        if attempt < MAX_DESCRIBE_RETRIES - 1:
-            logger.info("Class %s: attempt %d/%d, %d/%d images passed",
-                        name, attempt + 1, MAX_DESCRIBE_RETRIES,
-                        len(group_imgs) - still_failed, len(group_imgs))
-
-    final_failed = sum(1 for r in results if not r)
-    if final_failed > 0:
-        logger.warning("Class %s: %d/%d images failed all %d attempts",
-                       name, final_failed, len(group_imgs), MAX_DESCRIBE_RETRIES)
-
-    return results, failed_attempts
+def _replace_leading_semantic_label(description, display):
+    """Replace a generated leading semantic label and revalidate the description."""
+    if not description or not isinstance(description, str):
+        return ""
+    match = LEADING_SEMANTIC_LABEL_RE.match(description.strip().strip("'\""))
+    if not match:
+        return ""
+    normalized = f"{match.group('prefix')}{display}{match.group('suffix')}"
+    return normalized if validate_description(normalized, display) else ""
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description='LTGC Step 1: Image → Description')
-    parser.add_argument('-d', '--data_dir', default=IMAGENET_DIR, help='Dataset root')
-    parser.add_argument('-m', '--tail_num_threshold', default=50, type=int, help='Tail class threshold')
-    parser.add_argument('-f', '--class_number_file',
-                        default=CLASS_COUNT_FILE,
-                        help='Class count file')
-    parser.add_argument('-exi', '--existing_description_path',
-                        default=os.path.join(DESCRIPTIONS_DIR, 'existing_description_list.csv'),
-                        help='Output CSV path')
-    parser.add_argument('--examples-dir',
-                        default=None,
-                        help='Directory to save per-class Markdown examples (skip if not set)')
-    parser.add_argument('-t', '--test', action='store_true', help='Run in test mode with limited examples')
-    parser.add_argument('--log_dir', type=str, default="/tmp",
-                        help='Log file directory')
-    parser.add_argument('--num_gpus', type=int, default=1,
-                        help='Number of GPUs (DistributedSampler 数据并行)')
-    parser.add_argument('--num_workers', type=int, default=16,
-                        help='DataLoader workers per GPU (default: 16)')
-    parser.add_argument('--batch_size', type=int, default=6,
-                        help='Batch size for VLM inference (default: 6)')
-    parser.add_argument('--vlm-backend', type=str, default='qwen2vl',
-                        choices=['llava', 'qwen2vl'],
-                        help='VLM backend: llava | qwen2vl (default: qwen2vl)')
-    parser.add_argument('--prompt-file', type=str, default=None,
-                        help='Prompt JSON 配置文件（默认使用内置 prompt）')
+    parser = argparse.ArgumentParser(description="LTGC Step 1: Image -> Description")
+    parser.add_argument("-d", "--data-dir", required=True)
+    parser.add_argument("-exi", "--existing-description-path", required=True)
+    parser.add_argument("--class-mapping", required=True)
+    parser.add_argument("--descriptions-per-class", type=int, default=100)
+    parser.add_argument("--seed", type=int, default=2024)
+    parser.add_argument("--max-retries", type=int, default=3)
+    parser.add_argument("--num-gpus", type=int, default=1)
+    parser.add_argument("--batch-size", type=int, default=6)
+    parser.add_argument(
+        "--vlm-backend", choices=["llava", "qwen2vl", "qwen3vl"], default="qwen3vl"
+    )
+    parser.add_argument("--prompt-file", required=True)
+    parser.add_argument("--examples-dir")
+    parser.add_argument("--log-dir", default="/tmp")
+    parser.add_argument("--resume", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--force", action="store_true")
+    # Kept for compatible experiment invocations; class selection is mapping-driven.
+    parser.add_argument("-m", "--tail-num-threshold", type=int, default=None)
+    parser.add_argument("-f", "--class-number-file", default=None)
+    parser.add_argument("--num-workers", type=int, default=0)
+    parser.add_argument("-t", "--test", action="store_true")
     return parser.parse_args()
 
 
-def _find_free_port():
-    import socket
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        s.bind(('', 0))
-        return s.getsockname()[1]
+def _select_images(dataset, required_labels, limit, seed):
+    grouped = defaultdict(list)
+    for path, label in zip(dataset.img_paths, dataset.labels):
+        if str(label) in required_labels:
+            grouped[int(label)].append(path)
+    selected = {}
+    for label in sorted(map(int, required_labels)):
+        paths = grouped.get(label, [])
+        count = min(len(paths), limit)
+        selected[str(label)] = random.Random(seed + label).sample(paths, count)
+    return selected
 
 
-def setup_logger(name, log_path):
-    logger = logging.getLogger(name)
-    logger.setLevel(logging.INFO)
-    if logger.hasHandlers():
-        logger.handlers.clear()
-    fh = logging.FileHandler(log_path, mode="w")
-    fh.setFormatter(logging.Formatter(
-        "[%(name)s %(asctime)s] %(message)s", datefmt="%H:%M:%S"
-    ))
-    logger.addHandler(fh)
-
-    # Route submodule loggers (text_llm, vision_lmm) to the same file
-    for sub_name in ("text_llm", "vision_lmm"):
-        sub_logger = logging.getLogger(sub_name)
-        sub_logger.handlers.clear()
-        sub_logger.addHandler(fh)
-        sub_logger.setLevel(logging.INFO)
-        sub_logger.propagate = False
-
-    return logger
+def _signature(selected, mapping, args):
+    payload = {
+        "selected": selected,
+        "mapping": mapping,
+        "seed": args.seed,
+        "limit": args.descriptions_per_class,
+        "prompt_file": os.path.abspath(args.prompt_file),
+        "backend": args.vlm_backend,
+    }
+    return hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
 
 
-def _loader_kwargs(num_workers):
-    kwargs = {"num_workers": num_workers, "pin_memory": False}
-    if num_workers > 0:
-        kwargs["multiprocessing_context"] = mp.get_context('spawn')
-    return kwargs
+def _load_progress(progress_dir):
+    complete = {}
+    if not os.path.isdir(progress_dir):
+        return complete
+    for name in sorted(os.listdir(progress_dir)):
+        if not name.startswith("success_gpu") or not name.endswith(".csv"):
+            continue
+        with open(os.path.join(progress_dir, name), newline="", encoding="utf-8") as f:
+            for row in csv.reader(f):
+                if len(row) >= 3:
+                    complete[(row[0], row[1])] = row[2]
+    return complete
 
 
-def _ddp_worker(rank, world_size, args_dict):
-    """DDP worker rank/GPU N: DistributedSampler 自动按 rank 分片数据"""
-    os.environ['MASTER_ADDR'] = 'localhost'
-    os.environ['MASTER_PORT'] = str(args_dict['master_port'])
-
-    dist.init_process_group("gloo", rank=rank, world_size=world_size)
+def _worker(rank, chunks, args_dict, mapping, prompt, completed):
     torch.cuda.set_device(rank)
-
-    set_backend(args_dict['vlm_backend'])
-
-    log_dir = args_dict['log_dir']
-    log_path = os.path.join(log_dir, f"pipeline_describe_gpu{rank}.log")
-    logger = setup_logger(f"describe_gpu{rank}", log_path)
-
-    # 路由 vision_lmm / text_llm 模块日志到同一个 GPU 文件
-    import model.vision_lmm as _vlm
-    _vlm._log.handlers.clear()
-    _vlm._log.addHandler(logger.handlers[0])
-    _vlm._log.setLevel(logging.INFO)
-    _vlm._log.propagate = False
-
-    logger.info("DDP worker rank %d/%d initializing (batch_size=%d)...",
-                rank, world_size, args_dict.get('batch_size', 6))
-
-    transform = transforms.Compose([
-        transforms.ToTensor(),
-    ])
-
-    dataset = ImageNetLTDataset(args_dict['data_dir'], split='train', transform=transform)
-    sampler = DistributedSampler(
-        dataset, num_replicas=world_size, rank=rank, shuffle=False, drop_last=False
-    )
-    batch_size = args_dict.get('batch_size', 6)
-    num_workers = 0 if args_dict.get('test', False) else args_dict.get('num_workers', 4)
-    loader = DataLoader(
-        dataset, sampler=sampler, batch_size=batch_size,
-        collate_fn=collate_no_stack,
-        **_loader_kwargs(num_workers),
-    )
-
-    with open(args_dict['class_number_file'], 'r') as f:
-        class_counts = json.load(f)
-
-    output_base = args_dict['existing_description_path']
-    part_path = f"{output_base}.part{rank}"
-    # 创建/截断空文件，避免上次残留数据（即使主进程已清过，防御极端情况）
-    open(part_path, 'w').close()
-    data_to_write = []
-    examples_dir = args_dict.get('examples_dir')
-    per_class = defaultdict(list) if examples_dir else None
-    per_class_fails = defaultdict(list) if examples_dir else None
-    processed = 0
-    tail_count = 0
-
-    threshold = args_dict['tail_num_threshold']
-    test_mode = args_dict.get('test', False)
-
-    for data_list, target, index in loader:
-        B = len(target)
-
-        groups = defaultdict(list)
-        for i in range(B):
-            cls_id = int(target[i])
-            if class_counts.get(str(cls_id), 0) < threshold:
-                name = get_readable_name(cls_id).split(", ")[0]
-                groups[(cls_id, name)].append(i)
-
-        for (cls_id, name), indices in groups.items():
-            group_imgs = [data_list[i] for i in indices]
-            descriptions, fails = _describe_with_retry(group_imgs, name, logger, args_dict.get('vlm_prompt'))
-
-            tail_count += len(indices)
-            for i, desc in zip(indices, descriptions):
-                orig_idx = int(index[i]) if per_class is not None else None
-                img_path = dataset.img_paths[orig_idx] if per_class is not None else None
-
-                if desc:
-                    data_to_write.append((cls_id, desc))
-                    if per_class is not None:
-                        per_class[cls_id].append((img_path, desc))
-                elif img_path and i in fails:
-                    if per_class is not None:
-                        per_class_fails[cls_id].append((img_path, fails[i]))
-
-                if len(data_to_write) >= 10:
-                    with open(part_path, 'a', newline='') as f:
-                        csv.writer(f).writerows(data_to_write)
-                    data_to_write = []
-
-        processed += B
-        if test_mode and processed >= 1000:
-            break
-
-    if data_to_write:
-        with open(part_path, 'a', newline='') as f:
-            csv.writer(f).writerows(data_to_write)
-
-    if per_class:
-        tmp_dir = os.path.join(examples_dir, '.tmp')
-        os.makedirs(tmp_dir, exist_ok=True)
-        for cls_id, records in per_class.items():
-            name = get_readable_name(cls_id).split(", ")[0]
-            part_md = os.path.join(tmp_dir, f"{cls_id}.part{rank}.md")
-            with open(part_md, 'w') as f:
-                f.write(f"## Original Descriptions ({len(records)})\n\n")
-                for k, (img_path, desc) in enumerate(records, 1):
-                    img_rel = f"images/{cls_id}/{os.path.basename(img_path)}"
-                    f.write(f"### Image {k}\n\n")
-                    f.write(f"![Image {k}]({img_rel})\n\n")
-                    f.write(f"**Description:** {desc}\n\n")
-
-                # Fails section
-                fails_list = per_class_fails.get(cls_id, [])
-                if fails_list:
-                    f.write(f"\n## Fails ({len(fails_list)})\n\n")
-                    for k, (img_path, attempts) in enumerate(fails_list, 1):
-                        img_rel = f"images/{cls_id}/{os.path.basename(img_path)}"
-                        f.write(f"### Failed {k}\n\n")
-                        f.write(f"![Failed {k}]({img_rel})\n\n")
-                        for a, att in enumerate(attempts, 1):
-                            f.write(f"- Attempt {a}: {att}\n")
-                        f.write("\n")
-        logger.info("DDP rank %d wrote .part md for %d classes", rank, len(per_class))
-
-    logger.info("DDP rank %d done. Processed: %d, Tail: %d", rank, processed, tail_count)
-
-    del loader
-    torch.cuda.empty_cache()
-    dist.destroy_process_group()
+    set_backend(args_dict["vlm_backend"])
+    transform = transforms.ToTensor()
+    progress_dir = args_dict["progress_dir"]
+    part_path = os.path.join(progress_dir, f"success_gpu{rank}.csv")
+    failed_path = os.path.join(progress_dir, f"failed_gpu{rank}.json")
+    failures = {}
+    with open(part_path, "a", newline="", encoding="utf-8") as part:
+        writer = csv.writer(part)
+        for label, paths in chunks[rank]:
+            display = mapping[str(label)]
+            name, category, _ = parse_semantic_label(display)
+            pending = [path for path in paths if (str(label), path) not in completed]
+            for start in range(0, len(pending), args_dict["batch_size"]):
+                batch_paths = pending[start:start + args_dict["batch_size"]]
+                results = [""] * len(batch_paths)
+                rejected = [[] for _ in batch_paths]
+                for _ in range(args_dict["max_retries"]):
+                    indices = [i for i, value in enumerate(results) if not value]
+                    if not indices:
+                        break
+                    images = []
+                    for index in indices:
+                        with Image.open(batch_paths[index]) as image:
+                            image = _resize_for_vlm(image.convert("RGB"))
+                            images.append(transform(image))
+                    prompts = [prompt.format(name=name, category=category)] * len(images)
+                    responses = describe_image_batch(images, prompts, max_retries=1)
+                    for index, response in zip(indices, responses):
+                        value = response.strip().strip("'\"")
+                        if validate_description(value, display):
+                            results[index] = value
+                        elif value:
+                            rejected[index].append(value)
+                for index, attempts in enumerate(rejected):
+                    if results[index] or not attempts:
+                        continue
+                    results[index] = _replace_leading_semantic_label(
+                        attempts[-1], display
+                    )
+                for path, value, attempts in zip(batch_paths, results, rejected):
+                    if value:
+                        writer.writerow((label, path, value))
+                        part.flush()
+                    else:
+                        failures[f"{label}:{path}"] = attempts
+    atomic_json_dump(failures, failed_path)
 
 
-def _merge_parts(output_path, num_gpus, logger):
-    logger.info("Merging %d part files into %s", num_gpus, output_path)
-    tmp_path = output_path + ".tmp"
-    merged_count = 0
-    with open(tmp_path, 'w', newline='') as out_f:
-        writer = csv.writer(out_f)
-        for rank in range(num_gpus):
-            part_path = f"{output_path}.part{rank}"
-            if not os.path.exists(part_path):
-                logger.warning("Part file not found: %s", part_path)
-                continue
-            with open(part_path, 'r') as in_f:
-                reader = csv.reader(in_f)
-                for row in reader:
-                    writer.writerow(row)
-                    merged_count += 1
-    os.rename(tmp_path, output_path)
-    for rank in range(num_gpus):
-        part_path = f"{output_path}.part{rank}"
-        if os.path.exists(part_path):
-            os.remove(part_path)
-    logger.info("Merged %d rows into %s", merged_count, output_path)
-
-
-def _main_single_gpu(args, logger):
-    set_backend(args.vlm_backend)
-
-    # 路由 vision_lmm 日志到 describe 文件
-    import model.vision_lmm as _vlm
-    _vlm._log.handlers.clear()
-    _vlm._log.addHandler(logger.handlers[0])
-    _vlm._log.setLevel(logging.INFO)
-    _vlm._log.propagate = False
-
-    description_file = args.existing_description_path
-    tmp_file = description_file + ".tmp"
-    if os.path.exists(tmp_file):
-        os.remove(tmp_file)
-    open(tmp_file, 'w').close()
-
-    logger.info("Dataloading (single-GPU, batch_size=%d)...", args.batch_size)
-    transform = transforms.Compose([
-        transforms.ToTensor(),
-    ])
-    dataset = ImageNetLTDataset(args.data_dir, split='train', transform=transform)
-    num_workers = 0 if args.test else args.num_workers
-    loader = DataLoader(
-        dataset, batch_size=args.batch_size, shuffle=False,
-        collate_fn=collate_no_stack,
-        **_loader_kwargs(num_workers),
-    )
-
-    if not os.path.exists(args.class_number_file):
-        logger.info("Pre-computing class counts from filesystem...")
-        _count_classes_from_fs(args.data_dir, args.class_number_file, logger)
-    with open(args.class_number_file, 'r') as f:
-        class_counts = json.load(f)
-
-    data_to_write = []
-    processed = 0
-    tail_count = 0
-    examples_dir = args.examples_dir
-    per_class = defaultdict(list) if examples_dir else None
-    per_class_fails = defaultdict(list) if examples_dir else None
-
-    logger.info("Starting image description generation for tail classes...")
-
-    for data_list, target, index in loader:
-        B = len(target)
-
-        groups = defaultdict(list)
-        for i in range(B):
-            cls_id = int(target[i])
-            if class_counts.get(str(cls_id), 0) < args.tail_num_threshold:
-                name = get_readable_name(cls_id).split(", ")[0]
-                groups[(cls_id, name)].append(i)
-
-        for (cls_id, name), indices in groups.items():
-            group_imgs = [data_list[i] for i in indices]
-            descriptions, fails = _describe_with_retry(group_imgs, name, logger,
-                                                       args.vlm_prompt)
-
-            tail_count += len(indices)
-            for i, desc in zip(indices, descriptions):
-                orig_idx = int(index[i]) if per_class is not None else None
-                img_path = dataset.img_paths[orig_idx] if per_class is not None else None
-
-                if desc:
-                    data_to_write.append((cls_id, desc))
-                    if per_class is not None:
-                        per_class[cls_id].append((img_path, desc))
-                elif img_path and i in fails:
-                    if per_class is not None:
-                        per_class_fails[cls_id].append((img_path, fails[i]))
-
-                if len(data_to_write) >= 10:
-                    with open(tmp_file, 'a', newline='') as f:
-                        csv.writer(f).writerows(data_to_write)
-                    data_to_write = []
-
-        processed += B
-        if args.test and processed >= 1000:
-            break
-
-    if data_to_write:
-        with open(tmp_file, 'a', newline='') as f:
-            csv.writer(f).writerows(data_to_write)
-
-    if per_class:
-        _save_single_gpu_examples(per_class, per_class_fails, examples_dir, logger)
-
-    del loader
-    del dataset
-    os.rename(tmp_file, description_file)
-    logger.info("Single-GPU done. Processed: %d, Tail: %d, Output: %s", processed, tail_count, description_file)
-
-
-def _count_classes_from_fs(data_dir, class_number_file, logger):
-    """直接从目录结构统计各类别样本数（不走 DataLoader，极快）
-
-    ImageNet-LT 图片尺寸各异，DataLoader 默认 collate_fn 会 torch.stack
-    导致 crash。纯文件系统扫描不需要加载任何图片，0.2s 完成 11.6 万张统计。
-    """
-    class_counts = Counter()
-    train_dir = os.path.join(data_dir, "train")
-    for cls_name in os.listdir(train_dir):
-        cls_dir = os.path.join(train_dir, cls_name)
-        if os.path.isdir(cls_dir) and cls_name.isdigit():
-            count = sum(1 for f in os.listdir(cls_dir)
-                        if os.path.splitext(f)[1].lower() in SUPPORTED_EXTENSIONS)
-            if count > 0:
-                class_counts[int(cls_name)] = count
-    with open(class_number_file, 'w') as f:
-        json.dump(dict(sorted(class_counts.items())), f, indent=4)
-    logger.info("Class counts saved from FS scan: %d classes, %d total samples",
-                len(class_counts), sum(class_counts.values()))
-
-
-def _concat_class_examples(examples_dir, logger):
-    """将 .tmp/ 下的 per-worker part 文件 concat 成 examples_dir/{cls_id}.md"""
-    tmp_dir = os.path.join(examples_dir, '.tmp')
-    if not os.path.isdir(tmp_dir):
+def _write_examples(path, records, mapping):
+    if not path:
         return
-    from collections import defaultdict as _dd
-    class_parts = _dd(list)
-    for fname in sorted(os.listdir(tmp_dir)):
-        cls_id = fname.split('.')[0]
-        class_parts[cls_id].append(os.path.join(tmp_dir, fname))
-    for cls_id, parts in class_parts.items():
-        name = get_readable_name(int(cls_id)).split(", ")[0]
-        safe_name = name.replace(' ', '_').replace('/', '_')
-        md_path = os.path.join(examples_dir, f"{cls_id}_{safe_name}.md")
-        os.makedirs(examples_dir, exist_ok=True)
-        with open(md_path, 'w') as out:
-            out.write(f"# Class {cls_id}: {name}\n\n")
-            for part_path in sorted(parts):
-                with open(part_path) as f:
-                    out.write(f.read())
-    import shutil
-    shutil.rmtree(tmp_dir)
-    logger.info("Examples saved to %s (%d classes)", examples_dir, len(class_parts))
-
-
-def _save_single_gpu_examples(per_class, per_class_fails, examples_dir, logger):
-    """单 GPU 模式：直接写 examples_dir/{cls_id}.md"""
-    if not per_class or not examples_dir:
-        return
-    os.makedirs(examples_dir, exist_ok=True)
-    for cls_id, records in per_class.items():
-        name = get_readable_name(cls_id).split(", ")[0]
-        safe_name = name.replace(' ', '_').replace('/', '_')
-        md_path = os.path.join(examples_dir, f"{cls_id}_{safe_name}.md")
-        with open(md_path, 'w') as f:
-            f.write(f"# Class {cls_id}: {name}\n\n")
-            f.write(f"## Original Descriptions ({len(records)})\n\n")
-            for k, (img_path, desc) in enumerate(records, 1):
-                img_rel = f"images/{cls_id}/{os.path.basename(img_path)}"
-                f.write(f"### Image {k}\n\n")
-                f.write(f"![Image {k}]({img_rel})\n\n")
-                f.write(f"**Description:** {desc}\n\n")
-
-            fails_list = per_class_fails.get(cls_id, []) if per_class_fails else []
-            if fails_list:
-                f.write(f"\n## Fails ({len(fails_list)})\n\n")
-                for k, (img_path, attempts) in enumerate(fails_list, 1):
-                    img_rel = f"images/{cls_id}/{os.path.basename(img_path)}"
-                    f.write(f"### Failed {k}\n\n")
-                    f.write(f"![Failed {k}]({img_rel})\n\n")
-                    for a, att in enumerate(attempts, 1):
-                        f.write(f"- Attempt {a}: {att}\n")
-                    f.write("\n")
-    logger.info("Examples saved to %s (%d classes)", examples_dir, len(per_class))
+    os.makedirs(path, exist_ok=True)
+    grouped = defaultdict(list)
+    for label, image_path, description in records:
+        grouped[label].append((image_path, description))
+    for label, rows in grouped.items():
+        safe = mapping[label].replace("/", "_").replace(" ", "_")
+        with open(os.path.join(path, f"{label}_{safe}.md"), "w", encoding="utf-8") as f:
+            f.write(f"# Class {label}: {mapping[label]}\n\n")
+            for index, (image_path, description) in enumerate(rows, 1):
+                f.write(f"## Image {index}\n\n**Source:** `{image_path}`\n\n**Description:** {description}\n\n")
 
 
 def main():
     args = parse_args()
+    if args.descriptions_per_class <= 0 or args.max_retries <= 0:
+        raise ValueError("descriptions-per-class and max-retries must be positive")
     prompts = load_prompts(args.prompt_file)
-    args.vlm_prompt = prompts.get("describe", {}).get("vlm_prompt")
-
-    os.makedirs(os.path.dirname(args.existing_description_path), exist_ok=True)
-    os.makedirs(args.log_dir, exist_ok=True)
-    logger = setup_logger("describe", os.path.join(args.log_dir, "pipeline_describe.log"))
-
-    cleanup_stale_parts(args.existing_description_path, logger)
-
-    description_file = args.existing_description_path
-    tmp_file = description_file + ".tmp"
-    if os.path.exists(tmp_file):
-        logger.info("Removing stale temp file: %s", tmp_file)
-        os.remove(tmp_file)
-    if os.path.exists(description_file):
-        logger.info("Backuping existing description file: %s", description_file)
-        os.rename(description_file, description_file + "_" + time.strftime("%Y%m%d-%H%M%S"))
-
-    if args.num_gpus > 1:
-        logger.info("Multi-GPU DDP mode: %d GPUs", args.num_gpus)
-
-        if not os.path.exists(args.class_number_file):
-            logger.info("Pre-computing class counts from filesystem...")
-            _count_classes_from_fs(args.data_dir, args.class_number_file, logger)
-
-        master_port = _find_free_port()
-        worker_args = {
-            'data_dir': args.data_dir,
-            'tail_num_threshold': args.tail_num_threshold,
-            'class_number_file': args.class_number_file,
-            'existing_description_path': args.existing_description_path,
-            'examples_dir': args.examples_dir,
-            'test': args.test,
-            'log_dir': args.log_dir,
-            'num_workers': max(1, args.num_workers // args.num_gpus),
-            'batch_size': args.batch_size,
-            'master_port': master_port,
-            'vlm_backend': args.vlm_backend,
-            'vlm_prompt': args.vlm_prompt,
-        }
-
-        mp.spawn(_ddp_worker, args=(args.num_gpus, worker_args), nprocs=args.num_gpus, join=True)
-
-        _merge_parts(args.existing_description_path, args.num_gpus, logger)
-        if args.examples_dir:
-            _concat_class_examples(args.examples_dir, logger)
+    prompt = prompts.get("describe", {}).get("vlm_prompt")
+    if not prompt:
+        raise ValueError("prompt file is missing describe.vlm_prompt")
+    mapping = load_class_semantics(args.class_mapping)
+    dataset = ImageNetLTDataset(args.data_dir, split="train")
+    selected = _select_images(dataset, mapping, args.descriptions_per_class, args.seed)
+    empty = [label for label, paths in selected.items() if not paths]
+    if empty:
+        raise RuntimeError(f"Step1 classes have no source images: {empty}")
+    progress_dir = args.existing_description_path + ".progress"
+    args.progress_dir = progress_dir
+    os.makedirs(progress_dir, exist_ok=True)
+    signature = _signature(selected, mapping, args)
+    signature_path = os.path.join(progress_dir, "signature.json")
+    old_signature = None
+    if os.path.exists(signature_path):
+        with open(signature_path, encoding="utf-8") as f:
+            old_signature = json.load(f).get("signature")
+    if args.force or not args.resume:
+        import shutil
+        shutil.rmtree(progress_dir)
+        os.makedirs(progress_dir)
+        old_signature = None
+    if old_signature and old_signature != signature:
+        raise RuntimeError("Step1 resume signature mismatch; use --force to restart")
+    atomic_json_dump({"signature": signature, "selected": selected}, signature_path)
+    completed = _load_progress(progress_dir)
+    items = [(int(label), paths) for label, paths in sorted(selected.items(), key=lambda x: int(x[0]))]
+    world_size = max(1, args.num_gpus)
+    chunks = [[] for _ in range(world_size)]
+    for index, item in enumerate(items):
+        chunks[index % world_size].append(item)
+    if world_size == 1:
+        _worker(0, chunks, vars(args), mapping, prompt, completed)
     else:
-        _main_single_gpu(args, logger)
-
-    logger.info("Done. Output: %s", description_file)
+        mp.spawn(_worker, args=(chunks, vars(args), mapping, prompt, completed), nprocs=world_size, join=True)
+    complete = _load_progress(progress_dir)
+    expected = {(label, path) for label, paths in selected.items() for path in paths}
+    missing = sorted(expected - set(complete))
+    if missing:
+        atomic_json_dump({"missing": missing}, args.existing_description_path + ".failed.json")
+        raise RuntimeError(f"Step1 incomplete: {len(missing)} selected images have no valid description")
+    records = [(label, path, complete[(label, path)]) for label, path in sorted(expected, key=lambda x: (int(x[0]), x[1]))]
+    tmp = args.existing_description_path + ".tmp"
+    os.makedirs(os.path.dirname(os.path.abspath(tmp)), exist_ok=True)
+    with open(tmp, "w", newline="", encoding="utf-8") as f:
+        csv.writer(f).writerows((label, description) for label, _, description in records)
+    os.replace(tmp, args.existing_description_path)
+    failed_report = args.existing_description_path + ".failed.json"
+    if os.path.exists(failed_report):
+        os.remove(failed_report)
+    _write_examples(args.examples_dir, records, mapping)
+    print(f"[describe] wrote {len(records)} descriptions to {args.existing_description_path}")
 
 
 if __name__ == "__main__":

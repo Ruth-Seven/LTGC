@@ -247,7 +247,7 @@ def save_generation_markdown(records: list[tuple[str, str, str, float]], output_
             f.write(f"## Example {i+1}: {class_name}\n\n")
             f.write(f"**Class:** {class_name}  \n")
             f.write(f"**Description:** {description}  \n")
-            f.write(f"![Image]({img_filename})  \n")
+            f.write(f'<img src="{img_filename}" alt="Image" loading="lazy">  \n')
             f.write(f"**CLIP Score:** {clip_score:.4f}  \n\n")
             f.write("---\n\n")
     print(f"[save_generation_markdown] Examples saved to {md_path}")
@@ -283,7 +283,7 @@ def _write_class_generation_markdown(
         for k, (desc, score, img_path) in enumerate(records, 1):
             img_rel = f"images/{os.path.relpath(img_path, data_dir)}"
             f.write(f"### Image {k}\n\n")
-            f.write(f"![Image {k}]({img_rel})\n\n")
+            f.write(f'<img src="{img_rel}" alt="Image {k}" loading="lazy">\n\n')
             f.write(f"**Description:** {desc}\n\n")
             f.write(f"**CLIP Score:** {score:.4f}\n\n")
 
@@ -789,7 +789,7 @@ def main() -> None:
                 f.write(f"**Class ID:** {cid}\n\n")
                 f.write(f"**Class Name:** {cname}\n\n")
                 f.write(f"**Old Description:** {desc}\n\n")
-                f.write(f"![Failed Image {k}]({rel})\n\n")
+                f.write(f'<img src="{rel}" alt="Failed Image {k}" loading="lazy">\n\n')
                 f.write(f"**CLIP Score:** {score:.4f}\n\n---\n\n")
         print(f"[generate] Fail examples -> {fail_md_path}")
         fail_examples_elapsed = time.perf_counter() - fail_examples_start

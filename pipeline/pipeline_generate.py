@@ -306,10 +306,10 @@ def _worker(
 
     # ── 延迟导入：在 set_device 后加载模型，确保模型在指定 GPU 上 ──
     from config import GENERATION_EXAMPLE_DIR
-    from model.clip_score import score, score_batch
-    from model.image_gen import generate, generate_batch, unload_sd
-    from model.text_llm import reflect_one_description, _unload_model as unload_text_llm
-    from data_txt.imagenet_label_mapping import get_readable_name as _imagenet_class_name
+    from utils.model.LTGC.model.clip_score import score, score_batch
+    from utils.model.LTGC.model.image_gen import generate, generate_batch, unload_sd
+    from utils.model.LTGC.model.text_llm import reflect_one_description, _unload_model as unload_text_llm
+    from utils.model.LTGC.data_txt.imagenet_label_mapping import get_readable_name as _imagenet_class_name
 
     # ── 类别名映射（支持自定义 JSON mapping）──
     _class_map = load_class_semantics(args.class_mapping)

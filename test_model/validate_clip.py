@@ -17,9 +17,9 @@ from datetime import datetime
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from model.clip_score import score_batch
+from utils.model.LTGC.model.clip_score import score_batch
 from config import CLIP_BACKEND, CLIP_MODEL_NAME, IMAGENET_DIR
-from data_txt.imagenet_label_mapping import lable2name
+from utils.model.LTGC.data_txt.imagenet_label_mapping import lable2name
 
 
 # ── 工具函数 ──────────────────────────────────────────────────────

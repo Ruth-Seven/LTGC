@@ -18,7 +18,7 @@ from torchvision import transforms
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from data.data_loader import ImageNetLTDataset
-from model.vision_lmm import describe_image_batch, set_backend
+from utils.model.LTGC.model.vision_lmm import describe_image_batch, set_backend
 from utils import atomic_json_dump, load_class_semantics, load_prompts, parse_semantic_label, validate_description
 
 

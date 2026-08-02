@@ -163,13 +163,13 @@ def _extend_worker(rank, class_chunks, max_generate_num, fixed_number,
     logger = setup_logger(f"extend_gpu{rank}", log_path)
 
     # 路由 text_llm 模块日志到同一个 GPU 文件
-    import model.text_llm as _tllm
+    import utils.model.LTGC.model.text_llm as _tllm
     _tllm._log.handlers.clear()
     _tllm._log.addHandler(logger.handlers[0])
     _tllm._log.setLevel(logging.INFO)
     _tllm._log.propagate = False
 
-    from model.text_llm import extend_descriptions, determine_descriptions, reflection_descriptions, _unload_model
+    from utils.model.LTGC.model.text_llm import extend_descriptions, determine_descriptions, reflection_descriptions, _unload_model
 
     class_list = class_chunks[rank]
     failed_path = os.path.join(progress_dir, f"failed_gpu{rank}.json")
@@ -348,7 +348,7 @@ def main():
     reflection_prompt = ext_cfg.get("reflection_prompt") or reflection_prompt
     if not extension_prompt or not determine_prompt or not reflection_prompt:
         raise ValueError("prompt file is missing required Step2 prompts")
-    from model.text_llm import SYSTEM_PROMPT, set_system_prompt
+    from utils.model.LTGC.model.text_llm import SYSTEM_PROMPT, set_system_prompt
     system_prompt = ext_cfg.get("system_prompt") or SYSTEM_PROMPT
     set_system_prompt(system_prompt)
     signature_prompts = {

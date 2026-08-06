@@ -2,13 +2,16 @@
 文本生成模块
 使用本地 Qwen3-8B 模型进行文本生成。
 """
-import torch
-import re
 import logging
+import re
+
+import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from config import (
-    TEXT_LLM_MODEL_ID, TEXT_LLM_MAX_TOKENS, TEXT_LLM_TEMPERATURE,
+    TEXT_LLM_MAX_TOKENS,
+    TEXT_LLM_MODEL_ID,
+    TEXT_LLM_TEMPERATURE,
 )
 
 _log = logging.getLogger("text_llm")

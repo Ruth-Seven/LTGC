@@ -2,12 +2,19 @@
 图像生成模块
 支持 SD v1-5 和 SDXL，通过 config.SD_MODEL_VERSION 切换
 """
-import torch
-from diffusers import StableDiffusionPipeline, StableDiffusionXLPipeline
 import os
 
-from config import SD_MODEL_VERSION, SD_V1_5_PATH, SDXL_PATH, SD_IMAGE_SIZE, SD_NUM_INFERENCE_STEPS, SD_GUIDANCE_SCALE
+import torch
+from diffusers import StableDiffusionPipeline, StableDiffusionXLPipeline
 
+from config import (
+    SD_GUIDANCE_SCALE,
+    SD_IMAGE_SIZE,
+    SD_MODEL_VERSION,
+    SD_NUM_INFERENCE_STEPS,
+    SD_V1_5_PATH,
+    SDXL_PATH,
+)
 
 _pipe = None
 _version = None
@@ -99,7 +106,7 @@ def generate_batch(prompts, save_paths=None):
         except Exception as e:
             if attempt == 0:
                 print(f"[image_gen] Batch failed (attempt 1/2): {e}")
-                print(f"[image_gen] Unloading SD and retrying...")
+                print("[image_gen] Unloading SD and retrying...")
                 unload_sd()
             else:
                 print(f"[image_gen] Batch failed (attempt 2/2): {e}")

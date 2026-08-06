@@ -4,10 +4,10 @@ CLIP 质量筛选模块
   - "openai": 原生 OpenAI clip 库
   - "huggingface": transformers CLIPModel
 """
-import torch
-import os
 import logging
 import time
+
+import torch
 from PIL import Image
 
 from config import CLIP_BACKEND, CLIP_MODEL_NAME

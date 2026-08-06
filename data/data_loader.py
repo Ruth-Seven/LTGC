@@ -4,12 +4,11 @@ ImageNet-LT 数据集加载，支持数字目录结构
 """
 import os
 import random
-import numpy as np
-import torch
-from torch.utils.data import Dataset, DataLoader, Sampler
-from torchvision import transforms
-from PIL import Image
 
+import numpy as np
+from PIL import Image
+from torch.utils.data import DataLoader, Dataset, Sampler
+from torchvision import transforms
 
 SUPPORTED_EXTENSIONS = {'.png', '.jpg', '.jpeg', '.bmp'}
 

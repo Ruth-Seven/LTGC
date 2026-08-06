@@ -1,6 +1,5 @@
 """LTGC Step 0: infer a canonical ``name (category)`` label for every class."""
 import argparse
-import logging
 import os
 import random
 import sys
@@ -16,6 +15,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from data.data_loader import ImageNetLTDataset
 from utils.model.LTGC.data_txt.imagenet_label_mapping import get_readable_name
 from utils.model.LTGC.model.vision_lmm import describe_image_group, set_backend
+
 from utils import atomic_json_dump, load_prompts, parse_semantic_label
 
 

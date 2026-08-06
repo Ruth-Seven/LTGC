@@ -10,13 +10,12 @@ import hashlib
 import json
 import logging
 import os
-from random import randint
 import shutil
 import sys
+from random import randint
 
 import pandas as pd
 import torch.multiprocessing as mp
-
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -118,8 +117,7 @@ def _write_class_example(examples_dir, label, class_name, descriptions):
     tmp = f"{path}.tmp.{os.getpid()}"
     with open(tmp, "w", encoding="utf-8") as output:
         output.write(f"\n## Extended Descriptions ({len(descriptions)})\n\n")
-        for index, description in enumerate(descriptions, 1):
-            output.write(f"{index}. {description}\n")
+        output.writelines(f"{index}. {description}\n" for index, description in enumerate(descriptions, 1))
         output.write("\n")
     os.replace(tmp, path)
 
@@ -169,7 +167,12 @@ def _extend_worker(rank, class_chunks, max_generate_num, fixed_number,
     _tllm._log.setLevel(logging.INFO)
     _tllm._log.propagate = False
 
-    from utils.model.LTGC.model.text_llm import extend_descriptions, determine_descriptions, reflection_descriptions, _unload_model
+    from utils.model.LTGC.model.text_llm import (
+        _unload_model,
+        determine_descriptions,
+        extend_descriptions,
+        reflection_descriptions,
+    )
 
     class_list = class_chunks[rank]
     failed_path = os.path.join(progress_dir, f"failed_gpu{rank}.json")

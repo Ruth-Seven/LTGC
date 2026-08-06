@@ -3,24 +3,29 @@ LTGC 流水线 - Step 3: 图像生成
 读取扩展描述 -> SD 生成图像 -> CLIP 筛选 -> 保存
 支持 --num_gpus N 自动多卡数据并行
 """
-import os
-import sys
+import argparse
 import csv
+import faulthandler
 import hashlib
+import logging
+import os
 import random
 import shutil
-import argparse
-import logging
-import faulthandler
-from typing import Optional, Any
-import pandas as pd
+import sys
 from collections import defaultdict
+from typing import Any
+
+import pandas as pd
 import torch.multiprocessing as mp
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from config import DATA_DIR, EXTENDED_DESCRIPTION_PATH
-from utils import atomic_json_dump, validate_description, load_class_semantics, parse_semantic_label
+from utils import (
+    atomic_json_dump,
+    load_class_semantics,
+    validate_description,
+)
 
 
 def parse_args() -> argparse.Namespace:
@@ -293,8 +298,8 @@ def _worker(
     world_size: int,
     class_chunks: list[list[tuple[int, list[str]]]],
     args: argparse.Namespace,
-    examples_dir: Optional[str],
-    result_queue: Optional[mp.Queue] = None,
+    examples_dir: str | None,
+    result_queue: mp.Queue | None = None,
 ) -> None:
     """单 GPU worker：SD 生成 → CLIP 筛选 → 低分 refine 重试"""
     import torch as _torch
@@ -305,11 +310,13 @@ def _worker(
     logger = setup_logger(f"GPU{rank}", log_path)
 
     # ── 延迟导入：在 set_device 后加载模型，确保模型在指定 GPU 上 ──
-    from config import GENERATION_EXAMPLE_DIR
-    from utils.model.LTGC.model.clip_score import score, score_batch
-    from utils.model.LTGC.model.image_gen import generate, generate_batch, unload_sd
-    from utils.model.LTGC.model.text_llm import reflect_one_description, _unload_model as unload_text_llm
-    from utils.model.LTGC.data_txt.imagenet_label_mapping import get_readable_name as _imagenet_class_name
+    from utils.model.LTGC.data_txt.imagenet_label_mapping import (
+        get_readable_name as _imagenet_class_name,
+    )
+    from utils.model.LTGC.model.clip_score import score_batch
+    from utils.model.LTGC.model.image_gen import generate_batch, unload_sd
+    from utils.model.LTGC.model.text_llm import _unload_model as unload_text_llm
+    from utils.model.LTGC.model.text_llm import reflect_one_description
 
     # ── 类别名映射（支持自定义 JSON mapping）──
     _class_map = load_class_semantics(args.class_mapping)
@@ -334,7 +341,7 @@ def _worker(
     class_times = []  # (label, class_name, elapsed_sec, n, failed)
     failed_descs_path = os.path.join(args.log_dir, f"pipeline_generate_failed_descs_gpu{rank}.log")
     open(failed_descs_path, "w").close()
-    total_elapsed_start = time.time()
+    time.time()
     generated_imgs_dir = os.path.abspath(args.data_dir)
     fail_img_dir = os.path.join(generated_imgs_dir, "fail")
     parts_dir = os.path.join(generated_imgs_dir, "parts")
@@ -617,7 +624,7 @@ def _detect_gpus() -> int:
             ["nvidia-smi", "--query-gpu=index", "--format=csv,noheader"],
             capture_output=True, text=True, timeout=5
         )
-        return len([l for l in result.stdout.strip().split("\n") if l])
+        return len([entry for entry in result.stdout.strip().split("\n") if entry])
     except Exception:
         return 1
 
@@ -627,8 +634,9 @@ def main() -> None:
         faulthandler.enable(all_threads=True)
     except Exception:
         pass
-    from utils import load_prompts
     import time
+
+    from utils import load_prompts
     main_start = time.perf_counter()
     args = parse_args()
     if args.target_num <= 0:
@@ -681,7 +689,7 @@ def main() -> None:
             for rank in range(num_gpus)
         ]
 
-        print(f"[generate] All GPUs done.")
+        print("[generate] All GPUs done.")
     worker_elapsed = time.perf_counter() - worker_start
 
     # ── 合并所有 worker 的 success / fail 列表 ──

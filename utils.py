@@ -1,12 +1,12 @@
 """
 工具函数
 """
-from collections import Counter
-from tqdm import tqdm
 import json
 import os
 import re
+from collections import Counter
 
+from tqdm import tqdm
 
 SEMANTIC_LABEL_RE = re.compile(r"^\s*(?P<name>.+?)\s*\((?P<category>[^()]+)\)\s*$")
 
@@ -140,7 +140,7 @@ def load_prompts(prompt_file=None):
     path = prompt_file or DEFAULT_PROMPT_FILE
     if not os.path.exists(path):
         raise FileNotFoundError(f"Prompt file not found: {path}")
-    with open(path, 'r') as f:
+    with open(path) as f:
         data = json.load(f)
     for section in ("disambiguate", "describe", "extend", "generate"):
         if section not in data:

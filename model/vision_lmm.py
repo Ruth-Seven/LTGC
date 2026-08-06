@@ -2,15 +2,21 @@
 视觉语言模型模块
 支持 LLaVA / Qwen2-VL / Qwen3-VL 后端，通过 set_backend() 切换
 """
-import torch
-import time
 import logging
-from transformers import AutoProcessor
+import time
+
+import torch
 from PIL import Image
+from transformers import AutoProcessor
 
 from config import (
-    LOCAL_VLM_ID, VLM_MAX_TOKENS, LLAVA_MODEL_ID, QWEN2VL_MODEL_ID,
-    QWEN3VL_MODEL_ID, VLM_TEMPERATURE, VLM_TOP_P,
+    LLAVA_MODEL_ID,
+    LOCAL_VLM_ID,
+    QWEN2VL_MODEL_ID,
+    QWEN3VL_MODEL_ID,
+    VLM_MAX_TOKENS,
+    VLM_TEMPERATURE,
+    VLM_TOP_P,
 )
 
 _log = logging.getLogger("vision_lmm")

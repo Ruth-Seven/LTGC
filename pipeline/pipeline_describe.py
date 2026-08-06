@@ -3,7 +3,6 @@ import argparse
 import csv
 import hashlib
 import json
-import logging
 import os
 import random
 import re
@@ -19,8 +18,14 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from data.data_loader import ImageNetLTDataset
 from utils.model.LTGC.model.vision_lmm import describe_image_batch, set_backend
-from utils import atomic_json_dump, load_class_semantics, load_prompts, parse_semantic_label, validate_description
 
+from utils import (
+    atomic_json_dump,
+    load_class_semantics,
+    load_prompts,
+    parse_semantic_label,
+    validate_description,
+)
 
 MAX_IMAGE_EDGE = 1024
 LEADING_SEMANTIC_LABEL_RE = re.compile(

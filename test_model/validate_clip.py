@@ -7,20 +7,21 @@ CLIP 语义区分能力验证
   - Wrong-Class Original（随机错误类原图）
 每组按图片记录 score，输出 markdown 报告，图片通过软链接显示。
 """
-import os
-import sys
-import json
-import random
 import argparse
-import numpy as np
+import json
+import os
+import random
+import sys
 from datetime import datetime
+
+import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from utils.model.LTGC.model.clip_score import score_batch
-from config import CLIP_BACKEND, CLIP_MODEL_NAME, IMAGENET_DIR
 from utils.model.LTGC.data_txt.imagenet_label_mapping import lable2name
+from utils.model.LTGC.model.clip_score import score_batch
 
+from config import CLIP_BACKEND, CLIP_MODEL_NAME, IMAGENET_DIR
 
 # ── 工具函数 ──────────────────────────────────────────────────────
 
@@ -209,7 +210,7 @@ def main():
     # 4. 写 Markdown
     os.makedirs(out_dir, exist_ok=True)
     A = np.array(all_aug) if all_aug else np.array([])
-    O = np.array(all_org) if all_org else np.array([])
+    ORG = np.array(all_org) if all_org else np.array([])
     W = np.array(all_wrong) if all_wrong else np.array([])
 
     with open(output_path, "w") as f:
@@ -226,7 +227,7 @@ def main():
         f.write("## Summary\n\n")
         f.write("| Source | Count | Mean | Std | Min | Max |\n")
         f.write("|--------|-------|------|-----|-----|-----|\n")
-        for label, arr in [("Augmented", A), ("Original", O), ("Wrong-Class", W)]:
+        for label, arr in [("Augmented", A), ("Original", ORG), ("Wrong-Class", W)]:
             if len(arr):
                 f.write(f"| {label} | {len(arr)} | {arr.mean():.4f} | {arr.std():.4f} "
                         f"| {arr.min():.4f} | {arr.max():.4f} |\n")
@@ -241,7 +242,8 @@ def main():
                "-------|-------|-------|-------|---------|---------|--------|--------|")
         f.write(sep + "\n")
         for r in results:
-            fm = lambda x: f"{x:.4f}" if x is not None else "—"
+            def fm(x):
+                return f"{x:.4f}" if x is not None else "—"
             d_ao = f"{r['aug_mean'] - r['org_mean']:+.4f}" if r["aug_mean"] and r["org_mean"] else "—"
             d_aw = f"{r['aug_mean'] - r['wrong_mean']:+.4f}" if r["aug_mean"] and r["wrong_mean"] else "—"
             f.write(f"| {r['class_id']} | {r['class_name']} | {r['wrong_class_id']}:{r['wrong_class_name']} "

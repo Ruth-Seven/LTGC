@@ -115,12 +115,29 @@ def _generate(messages, max_tokens=TEXT_LLM_MAX_TOKENS,
 
 # ── Public API ─────────────────────────────────────────────────
 
-def extend_descriptions(existing_texts, prompt, number, enable_thinking=False, max_token=TEXT_LLM_MAX_TOKENS, temperature=TEXT_LLM_TEMPERATURE):
-    """基于已有描述生成新的多样化描述，截断到 number"""
+def extend_descriptions(existing_texts, prompt, number, prompt_instances=None,
+                        enable_thinking=False, max_token=TEXT_LLM_MAX_TOKENS,
+                        temperature=TEXT_LLM_TEMPERATURE):
+    """基于目标类描述和跨类真实描述实例生成新描述，截断到 number。"""
     existing_block = "\n".join(f"- {t}" for t in existing_texts)
+    content = f"Target-class real-image descriptions:\n{existing_block}"
+    if prompt_instances:
+        instance_blocks = []
+        for index, instance in enumerate(prompt_instances, 1):
+            descriptions = "\n".join(
+                f"- {text}" for text in instance["descriptions"]
+            )
+            instance_blocks.append(
+                f"Prompt instance {index} — {instance['class_name']}:\n{descriptions}"
+            )
+        content += (
+            "\n\nCross-class real-image prompt instances "
+            "(reference their description patterns only):\n"
+            + "\n\n".join(instance_blocks)
+        )
     messages = [
         {"role": "system", "content": SYSTEM_PROMPT},
-        {"role": "user", "content": f"Existing descriptions:\n{existing_block}\n\n{prompt}"},
+        {"role": "user", "content": f"{content}\n\n{prompt}"},
     ]
     response = _generate(
         messages,

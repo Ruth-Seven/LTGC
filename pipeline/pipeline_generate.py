@@ -36,8 +36,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument('-d', '--data_dir', default=DATA_DIR, help='Output root')
     parser.add_argument('-t', '--thresh', default=0.28, type=float, help='CLIP score threshold')
     parser.add_argument('-r', '--max_rounds', default=5, type=int, help='Max retry rounds')
-    parser.add_argument('--target-num', default=100, type=int,
-                        help='Required accepted images per class')
+    parser.add_argument('--max-target-number', '--max_target_number',
+                        dest='max_target_number', default=100, type=int,
+                        help='Maximum accepted images per class; actual target is capped by the class description count')
     parser.add_argument('--max-sample-attempts', default=1000, type=int,
                         help='Maximum sampled description candidates per class')
     parser.add_argument('-m', '--md', default=None, nargs='?', const="/tmp/gen_examples",
@@ -124,7 +125,7 @@ def _deduplicate_success_rows(rows: list[tuple]) -> list[tuple]:
 
 
 def _validate_success_counts(
-    rows: list[tuple], expected_labels: list[str], target_num: int,
+    rows: list[tuple], expected_labels: list[str], target_counts: dict[str, int],
 ) -> tuple[dict[str, int], list[str]]:
     counts = defaultdict(int)
     for row in rows:
@@ -133,7 +134,7 @@ def _validate_success_counts(
     incomplete = {
         label: counts.get(label, 0)
         for label in expected_labels
-        if counts.get(label, 0) != target_num
+        if counts.get(label, 0) != target_counts[label]
     }
     unexpected = sorted(set(counts) - expected)
     return incomplete, unexpected
@@ -299,7 +300,7 @@ def _worker(
     class_chunks: list[list[tuple[int, list[str]]]],
     args: argparse.Namespace,
     examples_dir: str | None,
-    result_queue: mp.Queue | None = None,
+    result_queue: Any = None,
 ) -> None:
     """单 GPU worker：SD 生成 → CLIP 筛选 → 低分 refine 重试"""
     import torch as _torch
@@ -310,13 +311,13 @@ def _worker(
     logger = setup_logger(f"GPU{rank}", log_path)
 
     # ── 延迟导入：在 set_device 后加载模型，确保模型在指定 GPU 上 ──
-    from utils.model.LTGC.data_txt.imagenet_label_mapping import (
+    from data_txt.imagenet_label_mapping import (
         get_readable_name as _imagenet_class_name,
     )
-    from utils.model.LTGC.model.clip_score import score_batch
-    from utils.model.LTGC.model.image_gen import generate_batch, unload_sd
-    from utils.model.LTGC.model.text_llm import _unload_model as unload_text_llm
-    from utils.model.LTGC.model.text_llm import reflect_one_description
+    from model.clip_score import score_batch
+    from model.image_gen import generate_batch, unload_sd
+    from model.text_llm import _unload_model as unload_text_llm
+    from model.text_llm import reflect_one_description
 
     # ── 类别名映射（支持自定义 JSON mapping）──
     _class_map = load_class_semantics(args.class_mapping)
@@ -382,7 +383,7 @@ def _worker(
             continue
 
         clip_prompt = f'A photo of a {class_name}'
-        target_num = args.target_num
+        target_num = args.target_counts[str(label)]
         class_success_rows = prior_success_by_label.get(str(label), [])[:target_num]
         success_list.extend(class_success_rows)
         for row in class_success_rows:
@@ -639,14 +640,10 @@ def main() -> None:
     from utils import load_prompts
     main_start = time.perf_counter()
     args = parse_args()
-    if args.target_num <= 0:
-        raise ValueError("--target-num must be positive")
+    if args.max_target_number <= 0:
+        raise ValueError("--max-target-number must be positive")
     if args.max_rounds <= 0:
         raise ValueError("--max-rounds must be positive")
-    if args.max_sample_attempts < args.target_num:
-        raise ValueError("--max-sample-attempts must be at least --target-num")
-    if args.onepath and args.target_num > 1:
-        raise ValueError("--onepath is incompatible with target-num greater than 1")
     prompts = load_prompts(args.prompt_file)
     args.reflect_one_prompt = prompts.get("generate", {}).get("reflect_one_prompt")
     args.generate_pic_style = prompts.get("generate", {}).get("generate_pic_style") or ""
@@ -667,6 +664,22 @@ def main() -> None:
     df = pd.read_csv(args.extended_description_path, header=None, names=['label', 'text'])
     grouped = sorted(df.groupby('label')['text'].apply(list).items())
     load_class_semantics(args.class_mapping, [label for label, _ in grouped])
+    args.target_counts = {
+        str(label): min(args.max_target_number, len(texts))
+        for label, texts in grouped
+    }
+    largest_target = max(args.target_counts.values(), default=0)
+    if args.max_sample_attempts < largest_target:
+        raise ValueError(
+            "--max-sample-attempts must be at least the largest per-class target "
+            f"({largest_target})"
+        )
+    if args.onepath and largest_target > 1:
+        raise ValueError("--onepath is incompatible with a per-class target greater than 1")
+    print(
+        f"[generate] Per-class target=min(max_target_number={args.max_target_number}, "
+        "description_count)"
+    )
     load_csv_elapsed = time.perf_counter() - load_csv_start
 
     worker_start = time.perf_counter()
@@ -743,7 +756,7 @@ def main() -> None:
 
     expected_labels = [str(label) for label, _ in grouped]
     incomplete, unexpected_labels = _validate_success_counts(
-        all_success, expected_labels, args.target_num
+        all_success, expected_labels, args.target_counts
     )
     if unexpected_labels:
         raise RuntimeError(f"Step3 has unexpected success labels: {unexpected_labels[:20]}")
@@ -759,7 +772,7 @@ def main() -> None:
     if incomplete:
         _write_rows_atomic(success_partial_path, header, all_success)
         atomic_json_dump({
-            "target_num": args.target_num,
+            "target_counts": args.target_counts,
             "counts": incomplete,
         }, incomplete_path)
         if os.path.exists(success_merged_path):

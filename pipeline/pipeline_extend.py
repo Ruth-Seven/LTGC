@@ -13,7 +13,7 @@ import logging
 import os
 import shutil
 import sys
-from random import randint, sample
+from random import choice, choices, randint
 
 import pandas as pd
 import torch.multiprocessing as mp
@@ -35,15 +35,19 @@ extension_prompt = None
 reflection_prompt = None
 determine_prompt = None
 
-GENERATION_MODE = "single_reference_cross_class_prompt_instances_single_output"
+GENERATION_MODE = "same_parent_single_reference_single_output_local_validation_only"
 ATTEMPT_MULTIPLIER = 3
-PROMPT_INSTANCE_DESCRIPTIONS_PER_TARGET = 3
+PROMPT_INSTANCE_DESCRIPTIONS_PER_TARGET = 1
 
 
-def generation_round_limit(target_num, batch_generate_num):
-    if batch_generate_num != 1:
-        raise ValueError("single-reference Step2 requires batch_generate_num=1")
-    return target_num * ATTEMPT_MULTIPLIER
+def generation_round_limit(description_target, _):
+    return description_target * ATTEMPT_MULTIPLIER
+
+
+def calculate_description_targets(grouped, target_number, fixed_number):
+    if target_number is not None:
+        return {str(label): max(0, target_number - len(texts)) for label, texts in grouped}
+    return {str(label): fixed_number for label, _ in grouped}
 
 
 def _sha256_file(path):
@@ -83,7 +87,7 @@ def _write_class_progress(progress_dir, label, descriptions):
     os.replace(tmp, path)
 
 
-def _load_completed_classes(progress_dir, target, class_map):
+def _load_completed_classes(progress_dir, description_targets, class_map):
     classes_dir = os.path.join(progress_dir, "classes")
     completed = {}
     if not os.path.isdir(classes_dir):
@@ -99,8 +103,10 @@ def _load_completed_classes(progress_dir, target, class_map):
             rows = list(csv.reader(source))
         descriptions = [row[1] for row in rows if len(row) == 2 and row[0] == label]
         class_name = class_map[label]
+        target = description_targets.get(label)
         valid = (
-            len(rows) == target
+            target is not None
+            and len(rows) == target
             and len(descriptions) == target
             and len(set(descriptions)) == target
             and all(validate_description(text, class_name) for text in descriptions)
@@ -154,24 +160,36 @@ def _get_class_name(label, class_map):
 
 
 def _sample_prompt_instances(all_existing, target_label, number, class_map):
-    """Sample one other real-image class per requested output, five texts each."""
-    candidates = [
-        (label, texts) for label, texts in all_existing.items() if str(label) != str(target_label)
-    ]
+    """Sample same-parent classes with replacement and one real description per draw."""
+    _, target_category, _ = parse_semantic_label(_get_class_name(target_label, class_map))
+    candidates = []
+    for label, texts in all_existing.items():
+        if str(label) == str(target_label):
+            continue
+        _, category, _ = parse_semantic_label(_get_class_name(label, class_map))
+        if category == target_category:
+            candidates.append((label, texts))
+    if not candidates:
+        raise ValueError(
+            f"no same-parent prompt-instance class for target {target_label} ({target_category})"
+        )
+    draws = choices(
+        candidates,
+        k=number * PROMPT_INSTANCE_DESCRIPTIONS_PER_TARGET,
+    )
     return [
         {
             "class_name": _get_class_name(label, class_map),
-            "descriptions": sample(texts, 1),
+            "descriptions": [choice(texts)],
         }
-        for label, texts in sample(candidates, number * PROMPT_INSTANCE_DESCRIPTIONS_PER_TARGET)
+        for label, texts in draws
     ]
 
 
 def _extend_worker(
     rank,
     class_chunks,
-    max_generate_num,
-    fixed_number,
+    description_targets,
     progress_dir,
     log_dir,
     class_map,
@@ -191,19 +209,14 @@ def _extend_worker(
     logger = setup_logger(f"extend_gpu{rank}", log_path)
 
     # 路由 text_llm 模块日志到同一个 GPU 文件
-    import utils.model.LTGC.model.text_llm as _tllm
+    import model.text_llm as _tllm
 
     _tllm._log.handlers.clear()
     _tllm._log.addHandler(logger.handlers[0])
     _tllm._log.setLevel(logging.INFO)
     _tllm._log.propagate = False
 
-    from utils.model.LTGC.model.text_llm import (
-        _unload_model,
-        determine_descriptions,
-        extend_descriptions,
-        reflection_descriptions,
-    )
+    from model.text_llm import _unload_model, extend_descriptions
 
     class_list = class_chunks[rank]
     failed_path = os.path.join(progress_dir, f"failed_gpu{rank}.json")
@@ -214,16 +227,15 @@ def _extend_worker(
         class_name = _get_class_name(label, class_map)
         name, category, class_name = parse_semantic_label(class_name)
         n_existing = len(texts)
-        target_num = fixed_number if fixed_number is not None else max_generate_num
+        description_target = description_targets[str(label)]
         logger.info(
-            "[class %s %s] %d/%d start: existing=%d target=%d fixed=%s",
+            "[class %s %s] %d/%d start: existing=%d description_target=%d",
             label,
             class_name,
             idx + 1,
             total,
             n_existing,
-            target_num,
-            fixed_number is not None,
+            description_target,
         )
 
         if n_existing == 0:
@@ -231,14 +243,14 @@ def _extend_worker(
             continue
 
         per_text = batch_generate_num
-        max_attempts = generation_round_limit(target_num, per_text)
+        max_attempts = generation_round_limit(description_target, per_text)
         all_new = []
         seen = set(texts)
         # Each attempt keeps one random target-class description as the factual
         # anchor and adds cross-class real-description prompt instances. Generated
         # history stays out of model context to avoid cross-round copying.
         for ti in range(max_attempts):
-            if len(all_new) >= target_num:
+            if len(all_new) >= description_target:
                 break
             reference_text = texts[randint(0, n_existing - 1)]
             prompt_instances = _sample_prompt_instances(all_existing, label, per_text, class_map)
@@ -264,54 +276,11 @@ def _extend_worker(
             unique_raw = list(dict.fromkeys(raw))
             fresh = [d for d in unique_raw if d not in seen and validate_description(d, class_name)]
 
-            reflect_list = []
-            if fresh:
-                reflect_list = determine_descriptions(
-                    fresh,
-                    prompt=det_prompt,
-                    enable_thinking=False,
-                    max_token=10 * len(fresh),
-                    temperature=0.1,
-                    do_sample=False,
-                )
-            if reflect_list:
-                reflected = reflection_descriptions(
-                    [fresh[idx - 1] for idx in reflect_list],
-                    prompt=ref_prompt.format(
-                        number=len(reflect_list), name=name, category=category
-                    ),
-                    number=len(reflect_list),
-                    enable_thinking=True,
-                    max_token=200 * len(reflect_list),
-                    temperature=0.3,
-                    do_sample=True,
-                )
-                reflected_indices = set(reflect_list)
-                new_fresh = [
-                    sentence
-                    for sentence_idx, sentence in enumerate(fresh, 1)
-                    if sentence_idx not in reflected_indices
-                ]
-                for reflect_idx, sentence in zip(reflect_list, reflected):
-                    if validate_description(sentence, class_name) and sentence not in seen:
-                        new_fresh.append(sentence)
-                    else:
-                        logger.info(
-                            "[class %s %s] reflect %d rejected by validation: %s",
-                            label,
-                            class_name,
-                            reflect_idx,
-                            sentence,
-                        )
-                reflected = new_fresh
-            else:
-                reflected = fresh
-
-            reflected = [d for d in dict.fromkeys(reflected) if d not in seen]
+            accepted = [d for d in dict.fromkeys(fresh) if d not in seen]
 
             logger.info("")
             logger.info(
-                "[class %s %s] desc %d/%d summary: raw=%d unique=%d fresh=%d reflected=%d",
+                "[class %s %s] desc %d/%d summary: raw=%d unique=%d fresh=%d accepted=%d",
                 label,
                 class_name,
                 ti + 1,
@@ -319,7 +288,7 @@ def _extend_worker(
                 len(raw),
                 len(unique_raw),
                 len(fresh),
-                len(reflected),
+                len(accepted),
             )
             for desc_idx, desc in enumerate(raw, 1):
                 logger.info(
@@ -341,9 +310,9 @@ def _extend_worker(
                     desc_idx,
                     desc,
                 )
-            for desc_idx, desc in enumerate(reflected, 1):
+            for desc_idx, desc in enumerate(accepted, 1):
                 logger.info(
-                    "[class %s %s] desc %d/%d reflected %d. %s",
+                    "[class %s %s] desc %d/%d accepted %d. %s",
                     label,
                     class_name,
                     ti + 1,
@@ -351,20 +320,20 @@ def _extend_worker(
                     desc_idx,
                     desc,
                 )
-            for description in reflected:
-                if len(all_new) >= target_num:
+            for description in accepted:
+                if len(all_new) >= description_target:
                     break
                 seen.add(description)
                 all_new.append(description)
 
-        all_new = list(dict.fromkeys(all_new))[:target_num]
-        if len(all_new) < target_num:
+        all_new = list(dict.fromkeys(all_new))[:description_target]
+        if len(all_new) < description_target:
             logger.error(
                 "[class %s %s] target not reached: output=%d target=%d rounds=%d",
                 label,
                 class_name,
                 len(all_new),
-                target_num,
+                description_target,
                 max_attempts,
             )
         logger.info("")
@@ -374,14 +343,14 @@ def _extend_worker(
             class_name,
             len(all_new),
         )
-        if len(all_new) == target_num:
+        if len(all_new) == description_target:
             _write_class_example(examples_dir, label, class_name, all_new)
             _write_class_progress(progress_dir, label, all_new)
         else:
             failures[str(label)] = {
                 "class_name": class_name,
                 "count": len(all_new),
-                "target": target_num,
+                "target": description_target,
             }
 
     logger.info("GPU %d done. %d classes processed.", rank, total)
@@ -397,20 +366,20 @@ def parse_args():
         default=os.path.join(DESCRIPTIONS_DIR, "existing_description_list.csv"),
         help="Input descriptions CSV",
     )
-    parser.add_argument(
-        "-m",
-        "--max_generate_num",
-        default=50,
+    target_group = parser.add_mutually_exclusive_group(required=True)
+    target_group.add_argument(
+        "--target-number",
+        "--target_number",
+        dest="target_number",
         type=int,
-        help="Max generation attempts per class, or descriptions per class when --fix-number is not set",
+        help="Target total descriptions per class, including existing descriptions",
     )
-    parser.add_argument(
+    target_group.add_argument(
         "--fix-number",
         "--fix_number",
         dest="fixed_number",
-        default=None,
         type=int,
-        help="Generate a fixed number of extended descriptions per class when possible",
+        help="Fixed number of new extended descriptions to generate per class",
     )
     parser.add_argument(
         "-ext",
@@ -433,6 +402,12 @@ def parse_args():
         type=str,
         default=None,
         help="Directory to save per-class Markdown (append Extended Descriptions section)",
+    )
+    parser.add_argument(
+        "--prompt-instance-description-path",
+        type=str,
+        default=None,
+        help="Optional full Step1 description pool used only for cross-class prompt instances",
     )
     parser.add_argument(
         "--prompt-file", type=str, default=None, help="Prompt JSON 配置文件（默认使用内置 prompt）"
@@ -458,19 +433,19 @@ def parse_args():
 def main():
     global extension_prompt, determine_prompt, reflection_prompt
     args = parse_args()
+    if args.target_number is not None and args.target_number <= 0:
+        raise ValueError("--target-number must be a positive integer")
     if args.fixed_number is not None and args.fixed_number <= 0:
         raise ValueError("--fix-number must be a positive integer")
-    if args.batch_generate_num != 1:
-        raise ValueError("--batch-generate-num must be 1 in single-reference mode")
     prompts = load_prompts(args.prompt_file)
 
     ext_cfg = prompts.get("extend", {})
     extension_prompt = ext_cfg.get("extension_prompt") or extension_prompt
     determine_prompt = ext_cfg.get("determine_prompt") or determine_prompt
     reflection_prompt = ext_cfg.get("reflection_prompt") or reflection_prompt
-    if not extension_prompt or not determine_prompt or not reflection_prompt:
-        raise ValueError("prompt file is missing required Step2 prompts")
-    from utils.model.LTGC.model.text_llm import SYSTEM_PROMPT, set_system_prompt
+    if not extension_prompt:
+        raise ValueError("prompt file is missing extend.extension_prompt")
+    from model.text_llm import SYSTEM_PROMPT, set_system_prompt
 
     system_prompt = ext_cfg.get("system_prompt") or SYSTEM_PROMPT
     set_system_prompt(system_prompt)
@@ -494,16 +469,39 @@ def main():
     grouped = sorted(df.groupby("label")["text"].apply(list).items())
     load_class_semantics(args.class_mapping, [label for label, _ in grouped])
     num_classes = len(grouped)
-    logger.info("Loaded %d classes from %s", num_classes, args.existing_description_path)
+    logger.info("Loaded %d target classes from %s", num_classes, args.existing_description_path)
 
-    target = args.fixed_number if args.fixed_number is not None else args.max_generate_num
-    if target <= 0:
-        raise ValueError("Step2 target must be a positive integer")
+    if args.prompt_instance_description_path:
+        prompt_df = pd.read_csv(
+            args.prompt_instance_description_path, header=None, names=["label", "text"]
+        )
+        prompt_grouped = sorted(prompt_df.groupby("label")["text"].apply(list).items())
+        load_class_semantics(args.class_mapping, [label for label, _ in prompt_grouped])
+        all_existing = dict(prompt_grouped)
+        logger.info(
+            "Loaded %d prompt-instance classes from %s",
+            len(all_existing),
+            args.prompt_instance_description_path,
+        )
+    else:
+        all_existing = dict(grouped)
+
+    description_targets = calculate_description_targets(
+        grouped,
+        args.target_number,
+        args.fixed_number,
+    )
+    target_grouped = [item for item in grouped if description_targets[str(item[0])] > 0]
+    logger.info(
+        "Step2 targets: classes=%d descriptions=%d",
+        len(target_grouped),
+        sum(description_targets.values()),
+    )
     progress_dir = args.extended_description_path + ".progress"
     if args.force or not args.resume:
         shutil.rmtree(progress_dir, ignore_errors=True)
     os.makedirs(progress_dir, exist_ok=True)
-    signature = _run_signature(args, class_map, signature_prompts, target)
+    signature = _run_signature(args, class_map, signature_prompts, description_targets)
     signature_path = os.path.join(progress_dir, "signature.json")
     if os.path.exists(signature_path):
         with open(signature_path, encoding="utf-8") as source:
@@ -511,16 +509,15 @@ def main():
         if old_signature != signature:
             raise RuntimeError("Step2 resume signature mismatch; use --force to restart")
     atomic_json_dump({"signature": signature}, signature_path)
-    completed = _load_completed_classes(progress_dir, target, class_map)
-    pending = [item for item in grouped if str(item[0]) not in completed]
+    completed = _load_completed_classes(progress_dir, description_targets, class_map)
+    pending = [item for item in target_grouped if str(item[0]) not in completed]
     logger.info(
-        "Step2 resume: completed=%d pending=%d target=%d",
+        "Step2 resume: completed=%d pending=%d descriptions=%d",
         len(completed),
         len(pending),
-        target,
+        sum(description_targets[str(label)] for label, _ in pending),
     )
 
-    all_existing = dict(grouped)
     num_gpus = args.num_gpus
     if not pending:
         logger.info("All %d classes restored from progress", num_classes)
@@ -528,8 +525,7 @@ def main():
         _extend_worker(
             0,
             [pending],
-            args.max_generate_num,
-            args.fixed_number,
+            description_targets,
             progress_dir,
             args.log_dir,
             class_map,
@@ -550,8 +546,7 @@ def main():
             _extend_worker,
             args=(
                 chunks,
-                args.max_generate_num,
-                args.fixed_number,
+                description_targets,
                 progress_dir,
                 args.log_dir,
                 class_map,
@@ -566,21 +561,21 @@ def main():
             join=True,
         )
 
-    completed = _load_completed_classes(progress_dir, target, class_map)
+    completed = _load_completed_classes(progress_dir, description_targets, class_map)
     incomplete = {
         str(label): len(completed.get(str(label), []))
-        for label, _ in grouped
+        for label, _ in target_grouped
         if str(label) not in completed
     }
     if incomplete:
         failed_path = args.extended_description_path + ".failed.json"
-        atomic_json_dump({"target": target, "counts": incomplete}, failed_path)
+        atomic_json_dump({"targets": description_targets, "counts": incomplete}, failed_path)
         raise RuntimeError(f"Step2 incomplete for {len(incomplete)} classes; report: {failed_path}")
 
     tmp_path = args.extended_description_path + ".tmp"
     with open(tmp_path, "w", newline="", encoding="utf-8") as output:
         writer = csv.writer(output)
-        for label, _ in grouped:
+        for label, _ in target_grouped:
             writer.writerows((str(label), text) for text in completed[str(label)])
     os.replace(tmp_path, args.extended_description_path)
     failed_path = args.extended_description_path + ".failed.json"

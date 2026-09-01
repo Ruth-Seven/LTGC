@@ -2,8 +2,11 @@
 文本生成模块
 使用本地 Qwen3-8B 模型进行文本生成。
 """
+
 import logging
+import os
 import re
+from pathlib import Path
 
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
@@ -18,6 +21,7 @@ _log = logging.getLogger("text_llm")
 
 _model = None
 _tokenizer = None
+_deepseek_client = None
 
 SYSTEM_PROMPT = "You are a helpful assistant that generates diverse and detailed image descriptions for image classification datasets."
 
@@ -30,6 +34,7 @@ def set_system_prompt(prompt):
 
 
 # ── Local backend ──────────────────────────────────────────────
+
 
 def _load_model():
     global _model, _tokenizer
@@ -57,8 +62,7 @@ def _unload_model():
     _log.info("Model unloaded.")
 
 
-def _generate_local(messages, max_tokens, temperature, do_sample, top_p,
-                    enable_thinking=None):
+def _generate_local(messages, max_tokens, temperature, do_sample, top_p, enable_thinking=None):
     model, tokenizer = _load_model()
 
     template_kwargs = {}
@@ -81,11 +85,91 @@ def _generate_local(messages, max_tokens, temperature, do_sample, top_p,
             top_p=top_p,
         )
 
-    response = tokenizer.decode(out[0][inputs['input_ids'].shape[1]:], skip_special_tokens=True)
+    response = tokenizer.decode(out[0][inputs["input_ids"].shape[1] :], skip_special_tokens=True)
     return response.strip()
 
 
+# ── DeepSeek API backend ────────────────────────────────────────
+
+
+def _load_deepseek_client():
+    global _deepseek_client
+    if _deepseek_client is None:
+        from openai import OpenAI
+
+        key = os.environ.get("DEEPSEEK_API_KEY")
+        if not key:
+            key = Path("~/.config/ltgc/deepseek_api_key").expanduser().read_text().strip()
+        _deepseek_client = OpenAI(
+            api_key=key,
+            base_url=os.environ.get("DEEPSEEK_BASE_URL", "https://api.deepseek.com"),
+        )
+    return _deepseek_client
+
+
+def _record_deepseek_cost(usage):
+    ledger_path = os.environ.get("DEEPSEEK_COST_LEDGER")
+    ceiling = os.environ.get("DEEPSEEK_MAX_COST_USD")
+    if not ledger_path or not ceiling:
+        return
+    import fcntl
+
+    cache_hit = getattr(usage, "prompt_cache_hit_tokens", 0) or 0
+    cache_miss = getattr(usage, "prompt_cache_miss_tokens", None)
+    if cache_miss is None:
+        cache_miss = usage.prompt_tokens - cache_hit
+    request_cost = (
+        cache_hit * 0.014
+        + cache_miss * 0.44
+        + usage.completion_tokens * 1.32
+    ) / 1_000_000
+    ledger = Path(ledger_path)
+    ledger.parent.mkdir(parents=True, exist_ok=True)
+    with ledger.open("a+") as output:
+        fcntl.flock(output, fcntl.LOCK_EX)
+        output.seek(0)
+        current = float(output.read().strip() or 0)
+        total = current + request_cost
+        output.seek(0)
+        output.truncate()
+        output.write(f"{total:.8f}\n")
+        output.flush()
+        fcntl.flock(output, fcntl.LOCK_UN)
+    if total > float(ceiling):
+        raise RuntimeError(
+            f"DeepSeek cost ceiling exceeded: ${total:.4f} > ${float(ceiling):.2f}"
+        )
+
+
+def _generate_deepseek(messages, max_tokens, temperature, do_sample, top_p, enable_thinking=None):
+    client = _load_deepseek_client()
+    thinking = "enabled" if enable_thinking else "disabled"
+    response = client.chat.completions.create(
+        model=os.environ.get("DEEPSEEK_MODEL", "deepseek-v4-pro"),
+        messages=messages,
+        max_tokens=max_tokens,
+        temperature=temperature if do_sample else 0,
+        top_p=top_p,
+        stream=False,
+        extra_body={"thinking": {"type": thinking}},
+    )
+    usage = response.usage
+    cache_hit = getattr(usage, "prompt_cache_hit_tokens", None)
+    cache_miss = getattr(usage, "prompt_cache_miss_tokens", None)
+    _log.info(
+        "deepseek usage prompt=%s completion=%s total=%s cache_hit=%s cache_miss=%s",
+        usage.prompt_tokens,
+        usage.completion_tokens,
+        usage.total_tokens,
+        cache_hit,
+        cache_miss,
+    )
+    _record_deepseek_cost(usage)
+    return (response.choices[0].message.content or "").strip()
+
+
 # ── Response 清理 ────────────────────────────────────────────────
+
 
 def _strip_thinking(response: str) -> str:
     """移除 Qwen3 thinking 模式的 <think>...</think> 推理块"""
@@ -104,40 +188,58 @@ def _parse_numbered_lines(response: str):
 
 # ── Dispatch ───────────────────────────────────────────────────
 
-def _generate(messages, max_tokens=TEXT_LLM_MAX_TOKENS,
-              temperature=TEXT_LLM_TEMPERATURE, do_sample=True, top_p=0.9,
-              enable_thinking=None):
+
+def _generate(
+    messages,
+    max_tokens=TEXT_LLM_MAX_TOKENS,
+    temperature=TEXT_LLM_TEMPERATURE,
+    do_sample=True,
+    top_p=0.9,
+    enable_thinking=None,
+):
+    if os.environ.get("TEXT_LLM_BACKEND", "local") == "deepseek":
+        return _generate_deepseek(
+            messages,
+            max_tokens,
+            temperature,
+            do_sample,
+            top_p,
+            enable_thinking=enable_thinking,
+        )
     return _generate_local(
-        messages, max_tokens, temperature, do_sample, top_p,
+        messages,
+        max_tokens,
+        temperature,
+        do_sample,
+        top_p,
         enable_thinking=enable_thinking,
     )
 
 
 # ── Public API ─────────────────────────────────────────────────
 
-def extend_descriptions(existing_texts, prompt, number, prompt_instances=None,
-                        enable_thinking=False, max_token=TEXT_LLM_MAX_TOKENS,
-                        temperature=TEXT_LLM_TEMPERATURE):
+
+def extend_descriptions(
+    existing_texts,
+    prompt,
+    number,
+    prompt_instances=None,
+    enable_thinking=False,
+    max_token=TEXT_LLM_MAX_TOKENS,
+    temperature=TEXT_LLM_TEMPERATURE,
+):
     """基于目标类描述和跨类真实描述实例生成新描述，截断到 number。"""
     existing_block = "\n".join(f"- {t}" for t in existing_texts)
-    content = f"Target-class real-image descriptions:\n{existing_block}"
+    content = f"Target-class descriptions:\n{existing_block}"
     if prompt_instances:
         instance_blocks = []
         for index, instance in enumerate(prompt_instances, 1):
-            descriptions = "\n".join(
-                f"- {text}" for text in instance["descriptions"]
-            )
-            instance_blocks.append(
-                f"Prompt instance {index} — {instance['class_name']}:\n{descriptions}"
-            )
-        content += (
-            "\n\nCross-class real-image prompt instances "
-            "(reference their description patterns only):\n"
-            + "\n\n".join(instance_blocks)
-        )
+            descriptions = "\n".join(f"- {text}" for text in instance["descriptions"])
+            instance_blocks.append(f"— {instance['class_name']}:\n{descriptions}")
+        content += "\n\nCross-class prompt:\n" + "\n".join(instance_blocks)
     messages = [
         {"role": "system", "content": SYSTEM_PROMPT},
-        {"role": "user", "content": f"{content}\n\n{prompt}"},
+        {"role": "user", "content": f"Task instructions:\n{prompt}\n\n{content}"},
     ]
     response = _generate(
         messages,
@@ -150,19 +252,30 @@ def extend_descriptions(existing_texts, prompt, number, prompt_instances=None,
     result = []
     for s in sentences:
         s = s.strip()
-        if s.startswith('A photo'):
-            s = s.split('\n')[0].strip()
-            if s and s.count('[') == 0 and s.count(']') == 0:
+        if s.startswith("A photo"):
+            s = s.split("\n")[0].strip()
+            if s and s.count("[") == 0 and s.count("]") == 0:
                 result.append(s)
     result = list(dict.fromkeys(result))
     _log.info(f"extend: parsed {len(result)} descriptions, returning {min(len(result), number)}")
-    if not result: 
-        _log.warning("extend: no valid descriptions generated, returning empty list\n Original response was:\n" + response + "\n\n")
+    if not result:
+        _log.warning(
+            "extend: no valid descriptions generated, returning empty list\n Original response was:\n"
+            + response
+            + "\n\n"
+        )
         return []
     return result[:number]
 
 
-def determine_descriptions(existing_texts, prompt, enable_thinking=False, max_token=TEXT_LLM_MAX_TOKENS, temperature=0.2, do_sample=False):
+def determine_descriptions(
+    existing_texts,
+    prompt,
+    enable_thinking=False,
+    max_token=TEXT_LLM_MAX_TOKENS,
+    temperature=0.2,
+    do_sample=False,
+):
     """返回需要 reflection 的 1-based description 序号。"""
     existing_block = ""
     for idx, text in enumerate(existing_texts):
@@ -188,7 +301,16 @@ def determine_descriptions(existing_texts, prompt, enable_thinking=False, max_to
 
     return result
 
-def reflection_descriptions(texts, prompt, number, enable_thinking=True, max_token=TEXT_LLM_MAX_TOKENS, temperature=0.2, do_sample=False):
+
+def reflection_descriptions(
+    texts,
+    prompt,
+    number,
+    enable_thinking=True,
+    max_token=TEXT_LLM_MAX_TOKENS,
+    temperature=0.2,
+    do_sample=False,
+):
     """去重/精炼描述列表，截断到 number"""
     existing_block = "\n".join(f"- {t}" for t in texts)
     messages = [
@@ -208,18 +330,32 @@ def reflection_descriptions(texts, prompt, number, enable_thinking=True, max_tok
     result = []
     for s in sentences:
         s = s.strip()
-        if s.startswith('A photo'):
-            s = s.split('\n')[0].strip()
+        if s.startswith("A photo"):
+            s = s.split("\n")[0].strip()
             result.append(s)
     result = list(dict.fromkeys(result))
-    _log.info(f"reflection: parsed {len(result)} descriptions, returning {min(len(result), number)}")
-    if not result: 
-        _log.warning("reflection: no valid descriptions generated, returning empty list\n Original response was:\n" + response + "\n\n")
+    _log.info(
+        f"reflection: parsed {len(result)} descriptions, returning {min(len(result), number)}"
+    )
+    if not result:
+        _log.warning(
+            "reflection: no valid descriptions generated, returning empty list\n Original response was:\n"
+            + response
+            + "\n\n"
+        )
         return []
     return result[:number]
 
 
-def reflect_one_description(description, class_name, prompt, enable_thinking=True, do_sample=False, temperature=0.2, max_token=1000):
+def reflect_one_description(
+    description,
+    class_name,
+    prompt,
+    enable_thinking=True,
+    do_sample=False,
+    temperature=0.2,
+    max_token=1000,
+):
     """润色描述
 
     Args:
@@ -232,8 +368,13 @@ def reflect_one_description(description, class_name, prompt, enable_thinking=Tru
     match = re.match(r"^\s*(.+?)\s*\(([^()]+)\)\s*$", class_name)
     if not match:
         raise ValueError(f"class_name must use name (category): {class_name!r}")
-    user_content = description + "\n" + prompt.format(
-        name=match.group(1).strip(), category=match.group(2).strip(),
+    user_content = (
+        description
+        + "\n"
+        + prompt.format(
+            name=match.group(1).strip(),
+            category=match.group(2).strip(),
+        )
     )
     messages = [
         {"role": "system", "content": SYSTEM_PROMPT},
@@ -254,9 +395,15 @@ def reflect_one_description(description, class_name, prompt, enable_thinking=Tru
     else:
         result = ""
     if not result:
-        _log.warning("reflect_one_description: no valid descriptions generated, returning empty string. Prompt: %s\nOriginal response was:\n%s\n\n", prompt, response)
+        _log.warning(
+            "reflect_one_description: no valid descriptions generated, returning empty string. Prompt: %s\nOriginal response was:\n%s\n\n",
+            prompt,
+            response,
+        )
         return ""
-    _log.warning("reflect_one_description: %s. \n regenerate a description: %s", description, result)
+    _log.warning(
+        "reflect_one_description: %s. \n regenerate a description: %s", description, result
+    )
     return result
 
 
@@ -275,6 +422,6 @@ def generate_template(class_name, prompt=None):
     ]
     response = _generate(messages, max_tokens=50, do_sample=False)
     response = response.strip()
-    if response.startswith('A photo'):
-        response = response.split('\n')[0].strip()
+    if response.startswith("A photo"):
+        response = response.split("\n")[0].strip()
     return response

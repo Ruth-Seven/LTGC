@@ -1,4 +1,5 @@
 """LTGC Step 1: sample real images per class and generate one description each."""
+
 import argparse
 import csv
 import hashlib
@@ -17,8 +18,8 @@ from torchvision import transforms
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from data.data_loader import ImageNetLTDataset
-from utils.model.LTGC.model.vision_lmm import describe_image_batch, set_backend
 
+from model.vision_lmm import describe_image_batch, set_backend
 from utils import (
     atomic_json_dump,
     load_class_semantics,
@@ -71,9 +72,7 @@ def parse_args():
     parser.add_argument("--max-retries", type=int, default=3)
     parser.add_argument("--num-gpus", type=int, default=1)
     parser.add_argument("--batch-size", type=int, default=6)
-    parser.add_argument(
-        "--vlm-backend", choices=["llava", "qwen2vl", "qwen3vl"], default="qwen3vl"
-    )
+    parser.add_argument("--vlm-backend", choices=["llava", "qwen2vl", "qwen3vl"], default="qwen3vl")
     parser.add_argument("--prompt-file", required=True)
     parser.add_argument("--examples-dir")
     parser.add_argument("--log-dir", default="/tmp")
@@ -141,7 +140,7 @@ def _worker(rank, chunks, args_dict, mapping, prompt, completed):
             name, category, _ = parse_semantic_label(display)
             pending = [path for path in paths if (str(label), path) not in completed]
             for start in range(0, len(pending), args_dict["batch_size"]):
-                batch_paths = pending[start:start + args_dict["batch_size"]]
+                batch_paths = pending[start : start + args_dict["batch_size"]]
                 results = [""] * len(batch_paths)
                 rejected = [[] for _ in batch_paths]
                 for _ in range(args_dict["max_retries"]):
@@ -164,9 +163,7 @@ def _worker(rank, chunks, args_dict, mapping, prompt, completed):
                 for index, attempts in enumerate(rejected):
                     if results[index] or not attempts:
                         continue
-                    results[index] = _replace_leading_semantic_label(
-                        attempts[-1], display
-                    )
+                    results[index] = _replace_leading_semantic_label(attempts[-1], display)
                 for path, value, attempts in zip(batch_paths, results, rejected):
                     if value:
                         writer.writerow((label, path, value))
@@ -188,7 +185,9 @@ def _write_examples(path, records, mapping):
         with open(os.path.join(path, f"{label}_{safe}.md"), "w", encoding="utf-8") as f:
             f.write(f"# Class {label}: {mapping[label]}\n\n")
             for index, (image_path, description) in enumerate(rows, 1):
-                f.write(f"## Image {index}\n\n**Source:** `{image_path}`\n\n**Description:** {description}\n\n")
+                f.write(
+                    f"## Image {index}\n\n**Source:** `{image_path}`\n\n**Description:** {description}\n\n"
+                )
 
 
 def main():
@@ -216,6 +215,7 @@ def main():
             old_signature = json.load(f).get("signature")
     if args.force or not args.resume:
         import shutil
+
         shutil.rmtree(progress_dir)
         os.makedirs(progress_dir)
         old_signature = None
@@ -223,7 +223,9 @@ def main():
         raise RuntimeError("Step1 resume signature mismatch; use --force to restart")
     atomic_json_dump({"signature": signature, "selected": selected}, signature_path)
     completed = _load_progress(progress_dir)
-    items = [(int(label), paths) for label, paths in sorted(selected.items(), key=lambda x: int(x[0]))]
+    items = [
+        (int(label), paths) for label, paths in sorted(selected.items(), key=lambda x: int(x[0]))
+    ]
     world_size = max(1, args.num_gpus)
     chunks = [[] for _ in range(world_size)]
     for index, item in enumerate(items):
@@ -231,14 +233,24 @@ def main():
     if world_size == 1:
         _worker(0, chunks, vars(args), mapping, prompt, completed)
     else:
-        mp.spawn(_worker, args=(chunks, vars(args), mapping, prompt, completed), nprocs=world_size, join=True)
+        mp.spawn(
+            _worker,
+            args=(chunks, vars(args), mapping, prompt, completed),
+            nprocs=world_size,
+            join=True,
+        )
     complete = _load_progress(progress_dir)
     expected = {(label, path) for label, paths in selected.items() for path in paths}
     missing = sorted(expected - set(complete))
     if missing:
         atomic_json_dump({"missing": missing}, args.existing_description_path + ".failed.json")
-        raise RuntimeError(f"Step1 incomplete: {len(missing)} selected images have no valid description")
-    records = [(label, path, complete[(label, path)]) for label, path in sorted(expected, key=lambda x: (int(x[0]), x[1]))]
+        raise RuntimeError(
+            f"Step1 incomplete: {len(missing)} selected images have no valid description"
+        )
+    records = [
+        (label, path, complete[(label, path)])
+        for label, path in sorted(expected, key=lambda x: (int(x[0]), x[1]))
+    ]
     tmp = args.existing_description_path + ".tmp"
     os.makedirs(os.path.dirname(os.path.abspath(tmp)), exist_ok=True)
     with open(tmp, "w", newline="", encoding="utf-8") as f:

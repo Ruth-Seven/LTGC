@@ -1,0 +1,13 @@
+{
+  "describe": {
+    "vlm_prompt": "Please use the Template to briefly describe the image of the class {name} in only one sentence. Template:\n'A photo of the class {name}, with [distinctive features], in [specific scenes].'\n"
+  },
+  "extend": {
+    "extension_prompt": "Generate exactly {number} new realistic descriptions for '{name} ({category})'. Use the target-class real-image description as the factual anchor and reference the cross-class real-image prompt instances only for their description patterns. Do not copy another class's identity or class-specific properties. Every subject, feature, action, spatial relationship, and scene must be physically possible in the real world.\nReturn a numbered list from 1 to {number}, one sentence per item. Use this form: A photo of a {name} ({category}) [doing/done], with [distinctive features], in [specific scene].",
+    "reflection_prompt": "From the provided description list, please select exactly {number} unique sentences for the class '{class_name}'. \nEach sentence must describe a different [distinctive feature] (e.g., texture, shape) or a [specific scene] (e.g., lighting, environment) to ensure diversity. Avoid near-duplicates.\nList the selected sentences numbered from 1 to {number}, one per line. Do not output more than {number} descriptions.",
+    "system_prompt": "You generate diverse, photorealistic, and physically plausible image descriptions for image-classification datasets."
+  },
+  "generate": {
+    "reflect_one_prompt": "From the description '{prompt}', please regenerate a better description for the class '{class_name}'. Each sentence must describe a different [distinctive feature] (e.g., texture, shape) or a [specific scene] (e.g., lighting, environment) to ensure diversity. Avoid near-duplicates."
+  }
+}

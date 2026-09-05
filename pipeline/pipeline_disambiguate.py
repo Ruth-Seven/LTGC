@@ -1,5 +1,4 @@
 """LTGC Step 0: infer a canonical ``name (category)`` label for every class."""
-
 import argparse
 import os
 import random
@@ -14,9 +13,9 @@ from torchvision import transforms
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from data.data_loader import ImageNetLTDataset
-from data_txt.imagenet_label_mapping import get_readable_name
+from utils.model.LTGC.data_txt.imagenet_label_mapping import get_readable_name
+from utils.model.LTGC.model.vision_lmm import describe_image_group, set_backend
 
-from model.vision_lmm import describe_image_group, set_backend
 from utils import atomic_json_dump, load_prompts, parse_semantic_label
 
 
@@ -28,7 +27,9 @@ def parse_args():
     parser.add_argument("--seed", type=int, default=2024)
     parser.add_argument("--max-retries", type=int, default=3)
     parser.add_argument("--num-gpus", type=int, default=1)
-    parser.add_argument("--vlm-backend", choices=["llava", "qwen2vl", "qwen3vl"], default="qwen3vl")
+    parser.add_argument(
+        "--vlm-backend", choices=["llava", "qwen2vl", "qwen3vl"], default="qwen3vl"
+    )
     parser.add_argument("--prompt-file", required=True)
     parser.add_argument("--log-dir", default="/tmp")
     return parser.parse_args()
@@ -74,11 +75,9 @@ def _worker(rank, chunks, args_dict, prompt):
         answer = ""
         reason = "empty response"
         for _ in range(args_dict["max_retries"]):
-            answer = (
-                describe_image_group(images, prompt.format(class_name=source_name), max_retries=1)
-                .strip()
-                .strip("'\"")
-            )
+            answer = describe_image_group(
+                images, prompt.format(class_name=source_name), max_retries=1
+            ).strip().strip("'\"")
             try:
                 result[str(label)] = _build_semantic_label(source_name, answer)
                 break
@@ -86,8 +85,8 @@ def _worker(rank, chunks, args_dict, prompt):
                 reason = str(exc)
         else:
             failures[str(label)] = {"response": answer, "reason": reason}
-    atomic_json_dump(result, f"{args_dict['output']}.part{rank}")
-    atomic_json_dump(failures, f"{args_dict['output']}.fail{rank}")
+    atomic_json_dump(result, f'{args_dict["output"]}.part{rank}')
+    atomic_json_dump(failures, f'{args_dict["output"]}.fail{rank}')
 
 
 def main():
@@ -115,7 +114,6 @@ def main():
         for suffix, target in (("part", merged), ("fail", failures)):
             path = f"{args.output}.{suffix}{rank}"
             import json
-
             with open(path, encoding="utf-8") as f:
                 target.update(json.load(f))
             os.remove(path)

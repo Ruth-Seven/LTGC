@@ -3,12 +3,9 @@
 使用本地 Qwen3-8B 模型进行文本生成。
 """
 
-import json
 import logging
-from datetime import datetime, timezone
 import os
 import re
-import threading
 from pathlib import Path
 
 import torch
@@ -25,18 +22,8 @@ _log = logging.getLogger("text_llm")
 _model = None
 _tokenizer = None
 _deepseek_client = None
-_deepseek_context = threading.local()
 
 SYSTEM_PROMPT = "You are a helpful assistant that generates diverse and detailed image descriptions for image classification datasets."
-
-
-def set_deepseek_sample_id(sample_id):
-    """Attach audit metadata to the current API worker thread."""
-    _deepseek_context.sample_id = sample_id
-
-
-def get_deepseek_sample_id():
-    return getattr(_deepseek_context, "sample_id", None)
 
 
 def set_system_prompt(prompt):
@@ -120,56 +107,45 @@ def _load_deepseek_client():
     return _deepseek_client
 
 
-def deepseek_usage_cost(usage, model, created):
-    """USD estimate from returned tokens and official peak/off-peak rates."""
-    peak_rates = {"deepseek-v4-flash": (0.014, 0.44, 1.32),
-                  "deepseek-v4-pro": (0.044, 1.32, 3.96)}[model]
-    when = datetime.fromtimestamp(created, timezone.utc)
-    peak = when.weekday() < 5 and (1 <= when.hour < 4 or 6 <= when.hour < 10)
-    rates = tuple(rate if peak else rate / 2 for rate in peak_rates)
-    hit = getattr(usage, "prompt_cache_hit_tokens", 0) or 0
-    miss = getattr(usage, "prompt_cache_miss_tokens", None)
-    if miss is None:
-        miss = usage.prompt_tokens - hit
-    tokens = (hit, miss, usage.completion_tokens)
-    return dict(prompt_tokens=usage.prompt_tokens, completion_tokens=usage.completion_tokens,
-        total_tokens=usage.total_tokens, cache_hit_tokens=hit, cache_miss_tokens=miss,
-        period="peak" if peak else "off-peak", created_utc=when.isoformat(),
-        rates_usd_per_million=dict(zip(("cache_hit", "cache_miss", "output"), rates)),
-        estimated_cost_usd=sum(n * rate for n, rate in zip(tokens, rates)) / 1_000_000,
-        conservative_cost_usd=sum(n * rate for n, rate in zip(tokens, peak_rates)) / 1_000_000,
-        pricing_source="https://api-docs.deepseek.com/quick_start/pricing/",
-        pricing_checked="2026-09-03")
-
-
-def _record_deepseek_cost(cost):
+def _record_deepseek_cost(usage):
     ledger_path = os.environ.get("DEEPSEEK_COST_LEDGER")
     ceiling = os.environ.get("DEEPSEEK_MAX_COST_USD")
-    if not ledger_path:
+    if not ledger_path or not ceiling:
         return
     import fcntl
 
+    cache_hit = getattr(usage, "prompt_cache_hit_tokens", 0) or 0
+    cache_miss = getattr(usage, "prompt_cache_miss_tokens", None)
+    if cache_miss is None:
+        cache_miss = usage.prompt_tokens - cache_hit
+    request_cost = (
+        cache_hit * 0.014
+        + cache_miss * 0.44
+        + usage.completion_tokens * 1.32
+    ) / 1_000_000
     ledger = Path(ledger_path)
     ledger.parent.mkdir(parents=True, exist_ok=True)
     with ledger.open("a+") as output:
         fcntl.flock(output, fcntl.LOCK_EX)
         output.seek(0)
-        total = float(output.read().strip() or 0) + cost["conservative_cost_usd"]
+        current = float(output.read().strip() or 0)
+        total = current + request_cost
         output.seek(0)
         output.truncate()
-        output.write(f"{total:.12f}\n")
+        output.write(f"{total:.8f}\n")
         output.flush()
         fcntl.flock(output, fcntl.LOCK_UN)
-    if ceiling and total > float(ceiling):
-        raise RuntimeError(f"DeepSeek cost ceiling exceeded: ${total:.4f} > ${float(ceiling):.2f}")
+    if total > float(ceiling):
+        raise RuntimeError(
+            f"DeepSeek cost ceiling exceeded: ${total:.4f} > ${float(ceiling):.2f}"
+        )
 
 
 def _generate_deepseek(messages, max_tokens, temperature, do_sample, top_p, enable_thinking=None):
     client = _load_deepseek_client()
     thinking = "enabled" if enable_thinking else "disabled"
-    model = os.environ.get("DEEPSEEK_MODEL", "deepseek-v4-flash")
     response = client.chat.completions.create(
-        model=model,
+        model=os.environ.get("DEEPSEEK_MODEL", "deepseek-v4-pro"),
         messages=messages,
         max_tokens=max_tokens,
         temperature=temperature if do_sample else 0,
@@ -188,20 +164,7 @@ def _generate_deepseek(messages, max_tokens, temperature, do_sample, top_p, enab
         cache_hit,
         cache_miss,
     )
-    cost = deepseek_usage_cost(usage, model, response.created)
-    usage_log = os.environ.get("DEEPSEEK_USAGE_LOG")
-    if usage_log:
-        import fcntl
-        record = dict(cost, request_id=response.id, model=model, response_model=response.model,
-            sample_id=get_deepseek_sample_id(), messages=messages,
-            response_text=response.choices[0].message.content,
-            finish_reason=response.choices[0].finish_reason)
-        with open(usage_log, "a") as output:
-            fcntl.flock(output, fcntl.LOCK_EX)
-            output.write(json.dumps(record, ensure_ascii=False) + "\n")
-            output.flush()
-            fcntl.flock(output, fcntl.LOCK_UN)
-    _record_deepseek_cost(cost)
+    _record_deepseek_cost(usage)
     return (response.choices[0].message.content or "").strip()
 
 
